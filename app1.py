@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from pathlib import Path
-import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import hashlib
 
@@ -330,13 +328,23 @@ def get_student_submissions(student_id, status_filter="All", type_filter="All", 
             params.append(type_filter)
         
         if days_filter == "Last 7 days":
-            query += " AND date >= DATE("now", "-7 days")"
+            query += " AND date >= DATE('now', '-7 days')"
         elif days_filter == "Last 30 days":
-            query += " AND date >= DATE("now", "-30 days")"
+            query += " AND date >= DATE('now', '-30 days')"
         
         query += " ORDER BY date DESC"
         
         df = pd.read_sql_query(query, conn, params=params)
+        return df
+    except:
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+def get_student_activities(student_id):
+    conn = sqlite3.connect('student_evaluation.db')
+    try:
+        df = pd.read_sql_query('SELECT activity_type, topic, date, duration_minutes, points_earned, remarks FROM activities WHERE student_id = ? ORDER BY date DESC', conn, params=(student_id,))
         return df
     except:
         return pd.DataFrame()
@@ -506,20 +514,17 @@ elif st.session_state.user_role == "student":
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("📊 Academic Progress")
-            fig = go.Figure(data=[go.Bar(name='Submissions', x=['Total', 'Graded'], y=[progress['total_submissions'], progress['graded_submissions']])])
-            fig.update_layout(barmode='group', height=300)
-            st.plotly_chart(fig, use_container_width=True)
+            st.metric("Total Submissions", progress['total_submissions'])
+            st.metric("Graded Submissions", progress['graded_submissions'])
+            st.metric("Average Points", f"{progress['avg_points']}")
+            st.metric("Submission Points", progress['submission_points'])
         
         with col2:
-            st.subheader("🎯 Points Breakdown")
-            if progress['submission_points'] + progress['activity_points'] > 0:
-                labels = ['Submission Points', 'Activity Points']
-                values = [progress['submission_points'], progress['activity_points']]
-                fig = px.pie(values=values, names=labels, hole=0.3)
-                fig.update_layout(height=300)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No points earned yet. Start submitting!")
+            st.subheader("🎯 Activity Progress")
+            st.metric("Total Activities", progress['total_activities'])
+            st.metric("Activity Points", progress['activity_points'])
+            st.metric("Total Points", total_points)
+            st.metric("Active Days", current_streak)
         
         st.subheader("📅 Recent Activity")
         daily_activity = get_daily_activity(student_id, 7)
@@ -634,11 +639,7 @@ elif st.session_state.user_role == "student":
                     st.success("Activity added successfully!")
                     st.rerun()
         
-        conn = sqlite3.connect('student_evaluation.db')
-        df = pd.read_sql_query(
-            'SELECT activity_type, topic, date, duration_minutes, points_earned, remarks FROM activities WHERE student_id = ? ORDER BY date DESC', 
-            conn, params=(student_id,))
-        conn.close()
+        df = get_student_activities(student_id)
         
         if not df.empty:
             total_activities = len(df)
@@ -649,11 +650,6 @@ elif st.session_state.user_role == "student":
                 st.metric("Total Activities", total_activities)
             with col2:
                 st.metric("Points Earned", total_points)
-            
-            st.subheader("Activity Breakdown")
-            activity_counts = df['activity_type'].value_counts()
-            fig = px.pie(values=activity_counts.values, names=activity_counts.index)
-            st.plotly_chart(fig, use_container_width=True)
             
             st.subheader("All Activities")
             st.dataframe(df, use_container_width=True)
@@ -691,13 +687,6 @@ elif st.session_state.user_role == "student":
             with col4:
                 st.metric("Avg Points/Day", f"{avg_points:.1f}")
             
-            st.subheader("📈 Activity Trends")
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=df['activity_date'], y=df['submission_count'], name='Submissions', marker_color='blue'))
-            fig.add_trace(go.Bar(x=df['activity_date'], y=df['activity_count'], name='Activities', marker_color='green'))
-            fig.update_layout(barmode='group', title='Daily Activity Overview', xaxis_title='Date', yaxis_title='Count')
-            st.plotly_chart(fig, use_container_width=True)
-            
             st.subheader("📋 Daily Log")
             st.dataframe(df, use_container_width=True)
         else:
@@ -719,18 +708,6 @@ elif st.session_state.user_role == "student":
         leaderboard = get_leaderboard(limit, class_filter)
         
         if not leaderboard.empty:
-            leaderboard['Is You'] = leaderboard['reg_no'] == student[1]
-            
-            st.subheader("🎖️ Top Performers")
-            if len(leaderboard) >= 3:
-                cols = st.columns(3)
-                medals = ["🥇", "🥈", "🥉"]
-                for i, col in enumerate(cols):
-                    with col:
-                        if i < len(leaderboard):
-                            row = leaderboard.iloc[i]
-                            st.metric(f"{medals[i]} {row['name']}", f"{row['total_points']} pts", row['class'])
-            
             st.subheader("📊 Full Leaderboard")
             display_df = leaderboard.copy()
             display_df = display_df[['Rank', 'name', 'class', 'total_points', 'current_streak', 'best_streak', 'submissions_graded', 'activities_count']]
@@ -752,14 +729,14 @@ elif st.session_state.user_role == "student":
         st.info(f"💰 You have **{student_points} points** available")
         
         rewards = [
-            {"name": "📚 Book Voucher", "cost": 500, "description": "Get a voucher for academic books"},
-            {"name": "🎮 Game Time", "cost": 300, "description": "Extra 2 hours of gaming time"},
-            {"name": "🍕 Pizza Party", "cost": 1000, "description": "Pizza party for your class"},
-            {"name": "🏆 Trophy", "cost": 2000, "description": "Custom achievement trophy"},
-            {"name": "📱 Tech Gadget", "cost": 5000, "description": "Latest tech gadget"},
-            {"name": "🎉 Celebration", "cost": 800, "description": "Class celebration party"},
-            {"name": "⭐ Star Badge", "cost": 200, "description": "Special recognition badge"},
-            {"name": "📝 Extra Credit", "cost": 400, "description": "5% extra credit on next assignment"},
+            {"name": "📚 Book Voucher", "cost": 50, "description": "Get a voucher for academic books"},
+            {"name": "🎮 Game Time", "cost": 30, "description": "Extra 2 hours of gaming time"},
+            {"name": "🍕 Pizza Party", "cost": 100, "description": "Pizza party for your class"},
+            {"name": "🏆 Trophy", "cost": 200, "description": "Custom achievement trophy"},
+            {"name": "📱 Tech Gadget", "cost": 500, "description": "Latest tech gadget"},
+            {"name": "🎉 Celebration", "cost": 80, "description": "Class celebration party"},
+            {"name": "⭐ Star Badge", "cost": 20, "description": "Special recognition badge"},
+            {"name": "📝 Extra Credit", "cost": 40, "description": "5% extra credit on next assignment"},
         ]
         
         cols = st.columns(2)
@@ -845,8 +822,7 @@ elif st.session_state.user_role == "teacher":
         class_dist = pd.read_sql_query("SELECT class, COUNT(*) as count FROM students GROUP BY class", conn)
         conn.close()
         if not class_dist.empty:
-            fig = px.bar(class_dist, x='class', y='count', title='Students per Class')
-            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(class_dist, use_container_width=True)
     
     elif page == "📝 Grade Submissions":
         st.header("Grade Submissions")
@@ -928,8 +904,6 @@ elif st.session_state.user_role == "teacher":
         
         if not class_performance.empty:
             st.subheader("📈 Class Performance")
-            fig = px.bar(class_performance, x='class', y='avg_points', title='Average Points per Class')
-            st.plotly_chart(fig, use_container_width=True)
             st.dataframe(class_performance, use_container_width=True)
         
         conn.close()
