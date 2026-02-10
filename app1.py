@@ -1,13 +1,11 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import datetime
 from pathlib import Path
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import hashlib
-import os
 
 st.set_page_config(page_title="Student Evaluation System", page_icon="📚", layout="wide", initial_sidebar_state="expanded")
 
@@ -23,7 +21,7 @@ def init_database():
     conn = sqlite3.connect('student_evaluation.db')
     c = conn.cursor()
     
-    # Create students table with all columns
+    # Create all tables from scratch
     c.execute('''
         CREATE TABLE IF NOT EXISTS students (
             student_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,38 +38,6 @@ def init_database():
         )
     ''')
     
-    # Check and add missing columns one by one
-    c.execute("PRAGMA table_info(students)")
-    columns = [col[1] for col in c.fetchall()]
-    
-    # Add missing columns one by one without problematic defaults
-    if 'total_points' not in columns:
-        try:
-            c.execute("ALTER TABLE students ADD COLUMN total_points INTEGER DEFAULT 0")
-        except:
-            pass
-    
-    if 'current_streak' not in columns:
-        try:
-            c.execute("ALTER TABLE students ADD COLUMN current_streak INTEGER DEFAULT 0")
-        except:
-            pass
-    
-    if 'best_streak' not in columns:
-        try:
-            c.execute("ALTER TABLE students ADD COLUMN best_streak INTEGER DEFAULT 0")
-        except:
-            pass
-    
-    if 'last_active' not in columns:
-        try:
-            c.execute("ALTER TABLE students ADD COLUMN last_active DATE")
-            # Update existing rows with current date
-            c.execute("UPDATE students SET last_active = DATE('now') WHERE last_active IS NULL")
-        except:
-            pass
-    
-    # Create teachers table
     c.execute('''
         CREATE TABLE IF NOT EXISTS teachers (
             teacher_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +50,6 @@ def init_database():
         )
     ''')
     
-    # Create submissions table
     c.execute('''
         CREATE TABLE IF NOT EXISTS submissions (
             submission_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,12 +67,10 @@ def init_database():
             file_path TEXT,
             submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             graded_at TIMESTAMP,
-            graded_by INTEGER,
-            FOREIGN KEY (student_id) REFERENCES students (student_id)
+            graded_by INTEGER
         )
     ''')
     
-    # Create activities table
     c.execute('''
         CREATE TABLE IF NOT EXISTS activities (
             activity_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,12 +81,10 @@ def init_database():
             duration_minutes INTEGER,
             points_earned INTEGER DEFAULT 0,
             status TEXT DEFAULT 'Completed',
-            remarks TEXT,
-            FOREIGN KEY (student_id) REFERENCES students (student_id)
+            remarks TEXT
         )
     ''')
     
-    # Create daily activity table
     c.execute('''
         CREATE TABLE IF NOT EXISTS daily_activity (
             log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,7 +100,6 @@ def init_database():
         )
     ''')
     
-    # Create rewards table
     c.execute('''
         CREATE TABLE IF NOT EXISTS rewards (
             reward_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,7 +113,6 @@ def init_database():
         )
     ''')
     
-    # Create point transactions table
     c.execute('''
         CREATE TABLE IF NOT EXISTS point_transactions (
             transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,14 +179,6 @@ def get_student(reg_no):
     conn.close()
     return student
 
-def get_student_by_id(student_id):
-    conn = sqlite3.connect('student_evaluation.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM students WHERE student_id = ?", (student_id,))
-    student = c.fetchone()
-    conn.close()
-    return student
-
 def add_submission(student_id, submission_type, subject, title, description, date, file_path=None):
     default_points = {'Daily Homework': 10, 'Weekly Assignment': 25, 'Monthly Assignment': 50, 'Seminar': 30, 'Project': 100, 'Research Paper': 75, 'Lab Report': 20}
     max_points = default_points.get(submission_type, 10)
@@ -276,28 +227,9 @@ def update_daily_activity(student_id, date, activity_type, points=0):
                 c.execute('INSERT INTO daily_activity (student_id, activity_date, submission_count, total_points_earned) VALUES (?, ?, 1, ?)', (student_id, date, points))
             else:
                 c.execute('INSERT INTO daily_activity (student_id, activity_date, activity_count, total_points_earned) VALUES (?, ?, 1, ?)', (student_id, date, points))
-        update_streak(student_id)
         conn.commit()
     except Exception as e:
-        pass  # Silently fail for now
-    finally:
-        conn.close()
-
-def update_streak(student_id):
-    conn = sqlite3.connect('student_evaluation.db')
-    c = conn.cursor()
-    try:
-        c.execute('SELECT COUNT(DISTINCT activity_date) FROM daily_activity WHERE student_id = ? AND activity_date >= DATE("now", "-7 days")', (student_id,))
-        current_streak = c.fetchone()[0] or 0
-        c.execute('UPDATE students SET current_streak = ?, last_active = DATE("now") WHERE student_id = ?', (current_streak, student_id))
-        c.execute('SELECT best_streak FROM students WHERE student_id = ?', (student_id,))
-        best_streak_result = c.fetchone()
-        best_streak = best_streak_result[0] if best_streak_result else 0
-        if current_streak > best_streak:
-            c.execute('UPDATE students SET best_streak = ? WHERE student_id = ?', (current_streak, student_id))
-        conn.commit()
-    except Exception as e:
-        pass  # Silently fail for now
+        pass
     finally:
         conn.close()
 
@@ -345,7 +277,7 @@ def get_leaderboard(limit=20, class_filter=None):
 def get_daily_activity(student_id, days=7):
     conn = sqlite3.connect('student_evaluation.db')
     try:
-        df = pd.read_sql_query('SELECT activity_date, submission_count, activity_count, total_points_earned, study_hours, attendance_status, remarks FROM daily_activity WHERE student_id = ? AND activity_date >= DATE("now", ?) ORDER BY activity_date DESC', conn, params=(student_id, f'-{days} days'))
+        df = pd.read_sql_query('SELECT activity_date, submission_count, activity_count, total_points_earned FROM daily_activity WHERE student_id = ? AND activity_date >= DATE("now", ?) ORDER BY activity_date DESC', conn, params=(student_id, f'-{days} days'))
         return df
     except:
         return pd.DataFrame()
@@ -398,9 +330,9 @@ def get_student_submissions(student_id, status_filter="All", type_filter="All", 
             params.append(type_filter)
         
         if days_filter == "Last 7 days":
-            query += " AND date >= DATE('now', '-7 days')"
+            query += " AND date >= DATE("now", "-7 days")"
         elif days_filter == "Last 30 days":
-            query += " AND date >= DATE('now', '-30 days')"
+            query += " AND date >= DATE("now", "-30 days")"
         
         query += " ORDER BY date DESC"
         
@@ -427,7 +359,6 @@ with st.sidebar:
                 st.success(f"**{student[2]}**")
                 st.info(f"Reg No: {student[1]}")
                 st.info(f"Class: {student[3]}")
-                # Safely access tuple indices
                 total_points = student[6] if len(student) > 6 else 0
                 current_streak = student[7] if len(student) > 7 else 0
                 st.info(f"Points: {total_points} 🏆")
@@ -548,7 +479,6 @@ elif st.session_state.user_role == "student":
     if page == "🏠 Dashboard":
         st.header(f"Welcome back, {student[2]}! 👋")
         
-        # Safely get student data
         total_points = student[6] if len(student) > 6 else 0
         current_streak = student[7] if len(student) > 7 else 0
         best_streak = student[8] if len(student) > 8 else 0
@@ -571,7 +501,6 @@ elif st.session_state.user_role == "student":
         
         st.markdown("---")
         
-        # Get progress
         progress = get_student_progress(student_id)
         
         col1, col2 = st.columns(2)
@@ -592,7 +521,6 @@ elif st.session_state.user_role == "student":
             else:
                 st.info("No points earned yet. Start submitting!")
         
-        # Recent activity
         st.subheader("📅 Recent Activity")
         daily_activity = get_daily_activity(student_id, 7)
         if not daily_activity.empty:
@@ -627,7 +555,7 @@ elif st.session_state.user_role == "student":
                 placeholder="Describe your submission, include any important notes...")
             
             uploaded_file = st.file_uploader("Upload File (optional)", 
-                type=['pdf', 'docx', 'txt', 'jpg', 'png', 'ppt', 'pptx', 'zip'])
+                type=['pdf', 'docx', 'txt', 'jpg', 'png'])
             
             submitted = st.form_submit_button("Submit", type="primary")
             
@@ -743,7 +671,7 @@ elif st.session_state.user_role == "student":
         
         conn = sqlite3.connect('student_evaluation.db')
         df = pd.read_sql_query(
-            'SELECT activity_date, submission_count, activity_count, total_points_earned, study_hours, attendance_status FROM daily_activity WHERE student_id = ? AND activity_date BETWEEN ? AND ? ORDER BY activity_date DESC', 
+            'SELECT activity_date, submission_count, activity_count, total_points_earned FROM daily_activity WHERE student_id = ? AND activity_date BETWEEN ? AND ? ORDER BY activity_date DESC', 
             conn, params=(student_id, start_date, end_date))
         conn.close()
         
@@ -1018,7 +946,7 @@ elif st.session_state.user_role == "teacher":
     elif page == "⚙️ Manage System":
         st.header("System Management")
         
-        tab1, tab2, tab3 = st.tabs(["📊 System Stats", "⚙️ Settings", "🔄 Maintenance"])
+        tab1, tab2 = st.tabs(["📊 System Stats", "⚙️ Settings"])
         
         with tab1:
             st.subheader("System Statistics")
@@ -1047,10 +975,6 @@ elif st.session_state.user_role == "teacher":
                 
                 stats_data["Metric"].append("Total Points Awarded")
                 stats_data["Value"].append(pd.read_sql_query("SELECT SUM(total_points) FROM students", conn).iloc[0,0] or 0)
-                
-                stats_data["Metric"].append("Average Points per Student")
-                avg_points = pd.read_sql_query("SELECT AVG(total_points) FROM students", conn).iloc[0,0] or 0
-                stats_data["Value"].append(f"{avg_points:.1f}")
             except:
                 pass
             finally:
@@ -1059,26 +983,15 @@ elif st.session_state.user_role == "teacher":
             if stats_data["Metric"]:
                 stats_df = pd.DataFrame(stats_data)
                 st.dataframe(stats_df, use_container_width=True)
-            
-            try:
-                db_size = Path('student_evaluation.db').stat().st_size / 1024 / 1024
-                st.info(f"📊 Database Size: {db_size:.2f} MB")
-            except:
-                pass
         
         with tab2:
             st.subheader("System Settings")
             st.info("Settings configuration will be available in the next update.")
-        
-        with tab3:
-            st.subheader("System Maintenance")
-            st.info("Maintenance functions will be available in the next update.")
 
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center'>
     <p>Continuous Student Evaluation & Monitoring System v2.0</p>
-    <p>Design and maintained by: S P Sajjan</p>
-    <p>📧 Contact: sajjanvsl@gmail.com | 📞 Help Desk: 9008802403</p>
+    <p>📧 Contact: admin@university.edu | 📞 Help Desk: 1800-123-456</p>
 </div>
 """, unsafe_allow_html=True)
