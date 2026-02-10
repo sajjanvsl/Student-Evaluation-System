@@ -966,6 +966,8 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center'>
     <p>Continuous Student Evaluation & Monitoring System v2.0</p>
-    <p>📧 Contact: admin@university.edu | 📞 Help Desk: 1800-123-456</p>
+     <p>Design and Maintained by: S P Sajjan, Assistant Professor, GFGCW, Jamkhandi</p>
+    <p>📧 Contact: sajjanvsl@gmail.com | 📞 Help Desk: 9008802403</p>
 </div>
 """, unsafe_allow_html=True)
+
