@@ -19,7 +19,12 @@ try:
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
-    st.warning("⚠️ scikit-learn not installed. AI features will use basic analysis only.")
+    # Define dummy classes/functions if needed
+    class TfidfVectorizer:
+        def fit_transform(self, texts):
+            return np.zeros((len(texts), 1))
+    def cosine_similarity(a, b):
+        return np.zeros((a.shape[0], b.shape[0]))
 
 st.set_page_config(page_title="Student Evaluation System", page_icon="📚", layout="wide", initial_sidebar_state="expanded")
 
@@ -38,6 +43,8 @@ if 'view_file' not in st.session_state:
     st.session_state.view_file = None
 if 'submission_review' not in st.session_state:
     st.session_state.submission_review = None
+if 'page' not in st.session_state:
+    st.session_state.page = "Welcome"
 
 # ---------- Database Helper (prevents locks) ----------
 def get_db_connection():
@@ -46,38 +53,7 @@ def get_db_connection():
     conn.execute("PRAGMA busy_timeout = 5000")  # 5 seconds
     return conn
 
-def execute_with_retry(query, params=None, fetchone=False, fetchall=False, commit=False):
-    """Execute a query with retry on database lock."""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            conn = get_db_connection()
-            c = conn.cursor()
-            if params:
-                c.execute(query, params)
-            else:
-                c.execute(query)
-            if commit:
-                conn.commit()
-            if fetchone:
-                result = c.fetchone()
-            elif fetchall:
-                result = c.fetchall()
-            else:
-                result = None
-            conn.close()
-            return result
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e) and attempt < max_retries - 1:
-                time.sleep(0.5)
-                continue
-            else:
-                raise
-        except Exception as e:
-            conn.close()
-            raise
-
-# ---------- Database Initialisation (idempotent) ----------
+# ---------- Database Initialisation ----------
 def init_database():
     """Create tables if they don't exist, add missing columns if needed."""
     conn = get_db_connection()
@@ -317,7 +293,7 @@ def init_database():
     conn.commit()
     conn.close()
 
-# ---------- Test User Creation (Only if they don't exist) ----------
+# ---------- Test User Creation ----------
 def ensure_test_users():
     """Create test users only if they don't exist - preserves existing registrations."""
     conn = get_db_connection()
@@ -379,30 +355,21 @@ def cleanup_old_data():
     c = conn.cursor()
     six_months_ago = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
     try:
-        # Only delete submissions and activities - NOT users
         c.execute('DELETE FROM submissions WHERE date < ?', (six_months_ago,))
         c.execute('DELETE FROM activities WHERE date < ?', (six_months_ago,))
         c.execute('DELETE FROM daily_activity WHERE activity_date < ?', (six_months_ago,))
         c.execute('DELETE FROM password_reset WHERE created_at < ?', (six_months_ago,))
-        
-        # Get count of deleted records
-        deleted_subs = c.rowcount
         conn.commit()
-        print(f"✅ Cleaned up data older than 6 months. Deleted {deleted_subs} old submissions.")
+        print(f"✅ Cleaned up data older than 6 months.")
     except Exception as e:
         print(f"Cleanup error: {e}")
     finally:
         conn.close()
 
-# ---------- AI Validation Functions (with fallback) ----------
+# ---------- AI Validation Functions ----------
 def validate_submission_with_ai(submission_text, subject, topic=None):
     """
-    Validate student submission using AI techniques:
-    1. Length and structure analysis
-    2. Keyword relevance scoring
-    3. Plagiarism detection (against reference answers)
-    4. Content quality assessment
-    
+    Validate student submission using AI techniques.
     Falls back to basic analysis if scikit-learn is not available.
     """
     if not submission_text or len(submission_text.strip()) < 10:
@@ -418,7 +385,6 @@ def validate_submission_with_ai(submission_text, subject, topic=None):
     # Basic metrics
     word_count = len(submission_text.split())
     sentence_count = len(re.findall(r'[.!?]+', submission_text))
-    avg_word_length = np.mean([len(word) for word in submission_text.split()]) if word_count > 0 else 0
     
     # Get reference answers for this subject/topic
     conn = get_db_connection()
@@ -436,7 +402,7 @@ def validate_submission_with_ai(submission_text, subject, topic=None):
     references = [row[0] for row in c.fetchall()]
     conn.close()
     
-    # Calculate similarity with reference answers (if sklearn available)
+    # Calculate similarity with reference answers
     similarity_scores = []
     if references and SKLEARN_AVAILABLE:
         try:
@@ -569,13 +535,11 @@ def add_student_with_password(reg_no, name, class_name, email, password, phone=N
     finally:
         conn.close()
 
-# Student self-edit function
 def edit_student_registration(student_id, name, class_name, email, phone):
     """Update student registration details (excluding password and reg_no)."""
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        # Check if email is already used by another student
         c.execute("SELECT student_id FROM students WHERE email = ? AND student_id != ?", (email, student_id))
         existing = c.fetchone()
         if existing:
@@ -589,7 +553,6 @@ def edit_student_registration(student_id, name, class_name, email, phone):
         ''', (name, class_name, email, phone, student_id))
         conn.commit()
         
-        # Update the session with new values
         c.execute("SELECT * FROM students WHERE student_id = ?", (student_id,))
         updated_student = c.fetchone()
         st.session_state.current_student = updated_student
@@ -601,20 +564,17 @@ def edit_student_registration(student_id, name, class_name, email, phone):
     finally:
         conn.close()
 
-# Faculty edit student function
 def faculty_edit_student(student_id, reg_no, name, class_name, email, phone, password=None):
     """Faculty can edit all student details including registration number and password."""
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        # Check if reg_no is already used by another student
         c.execute("SELECT student_id FROM students WHERE reg_no = ? AND student_id != ?", (reg_no, student_id))
         existing_reg = c.fetchone()
         if existing_reg:
             st.error("Registration number already exists for another student!")
             return False
         
-        # Check if email is already used by another student
         c.execute("SELECT student_id FROM students WHERE email = ? AND student_id != ?", (email, student_id))
         existing_email = c.fetchone()
         if existing_email:
@@ -859,10 +819,6 @@ def remove_student_subject(student_id, subject_id):
 
 # ---------- Forgot Password ----------
 def forgot_password(email, user_type):
-    """
-    Reset password for a user (student or teacher).
-    Returns (success, temp_password or error message).
-    """
     email = email.strip().lower()
     conn = get_db_connection()
     c = conn.cursor()
@@ -983,14 +939,10 @@ def get_auto_grade_letter(submission_type):
 
 def add_submission_with_ai(student_id, submission_type, subject, title, description, date,
                            file_path=None, file_name=None, file_type=None, file_size=None):
-    """Add submission with AI validation and auto-grading."""
     points = get_auto_grade_points(submission_type)
     grade = get_auto_grade_letter(submission_type)
     
-    # AI validation
     ai_result = validate_submission_with_ai(description, subject)
-    
-    # Adjust points based on AI confidence
     adjusted_points = points * ai_result['confidence']
     
     conn = get_db_connection()
@@ -1032,7 +984,6 @@ def add_submission_with_ai(student_id, submission_type, subject, title, descript
         update_daily_activity(student_id, date, 'submission', adjusted_points)
         conn.commit()
         
-        # Store AI result in session for display
         st.session_state.submission_review = ai_result
         
         return submission_id
@@ -1275,13 +1226,13 @@ with st.sidebar:
                 st.info(f"Email: {student[4]}")
                 st.info(f"Points: {student[7]} 🏆")
                 st.info(f"Streak: {student[8]} days 🔥")
-                # Add Edit Registration button
                 if st.button("✏️ Edit Registration"):
                     st.session_state.page = "edit_registration"
                     st.rerun()
             if st.button("Logout"):
                 st.session_state.current_student = None
                 st.session_state.user_role = None
+                st.session_state.page = "Welcome"
                 st.rerun()
         elif st.session_state.user_role == "teacher":
             teacher = st.session_state.current_teacher
@@ -1293,6 +1244,7 @@ with st.sidebar:
             if st.button("Logout"):
                 st.session_state.current_teacher = None
                 st.session_state.user_role = None
+                st.session_state.page = "Welcome"
                 st.rerun()
     else:
         st.header("🔐 Login")
@@ -1312,7 +1264,7 @@ with st.sidebar:
                         if student:
                             st.session_state.current_student = student
                             st.session_state.user_role = "student"
-                            st.success(f"Welcome, {student[2]}!")
+                            st.session_state.page = "🏠 Dashboard"
                             st.rerun()
                         else:
                             st.error("Invalid email or password!")
@@ -1325,7 +1277,7 @@ with st.sidebar:
                         if student:
                             st.session_state.current_student = student
                             st.session_state.user_role = "student"
-                            st.success(f"Welcome, {student[2]}!")
+                            st.session_state.page = "🏠 Dashboard"
                             st.rerun()
                         else:
                             st.error("Invalid registration number or password!")
@@ -1341,12 +1293,11 @@ with st.sidebar:
                     if teacher:
                         st.session_state.current_teacher = teacher
                         st.session_state.user_role = "teacher"
-                        st.success(f"Welcome, Professor {teacher[2]}!")
+                        st.session_state.page = "🏠 Teacher Dashboard"
                         st.rerun()
                     else:
                         st.error("Invalid email or password!")
 
-        # Forgot Password Tab
         with login_tab3:
             st.subheader("🔑 Forgot Password")
             with st.form("forgot_password_form"):
@@ -1366,7 +1317,6 @@ with st.sidebar:
                         else:
                             st.error(f"❌ {result}")
 
-        # Debug panel (optional)
         with st.expander("🔧 Debug"):
             if st.button("🚀 Direct Login as Test Student"):
                 conn = get_db_connection()
@@ -1377,6 +1327,7 @@ with st.sidebar:
                 if student:
                     st.session_state.current_student = student
                     st.session_state.user_role = "student"
+                    st.session_state.page = "🏠 Dashboard"
                     st.rerun()
                 else:
                     st.error("Test student not found.")
@@ -1397,30 +1348,39 @@ with st.sidebar:
     if st.session_state.user_role:
         st.header("📱 Navigation")
         if st.session_state.user_role == "student":
-            if 'page' not in st.session_state or st.session_state.page not in ["edit_registration"]:
-                st.session_state.page = st.radio("Go to:", [
+            if st.session_state.page != "edit_registration":
+                selected = st.radio("Go to:", [
                     "🏠 Dashboard", "📚 My Subjects", "➕ New Submission", "➕ Extra Activity",
                     "📋 My Submissions", "📂 My Uploads", "📈 Daily Activity", "🏆 Leaderboard",
                     "🎁 Rewards", "👤 Edit Profile"
                 ])
+                if selected != st.session_state.page:
+                    st.session_state.page = selected
+                    st.rerun()
             else:
-                # Show radio without changing the page when in edit mode
                 st.radio("Go to:", [
                     "🏠 Dashboard", "📚 My Subjects", "➕ New Submission", "➕ Extra Activity",
                     "📋 My Submissions", "📂 My Uploads", "📈 Daily Activity", "🏆 Leaderboard",
                     "🎁 Rewards", "👤 Edit Profile"
                 ], index=0, disabled=True)
+                if st.button("← Back to Dashboard"):
+                    st.session_state.page = "🏠 Dashboard"
+                    st.rerun()
         else:
-            page = st.radio("Go to:", [
+            selected = st.radio("Go to:", [
                 "🏠 Teacher Dashboard", "📚 Subject Management", "👨‍🎓 Manage Students",
                 "📂 View Submissions", "📊 Class Analytics", "🏆 Leaderboard", "👤 Edit Profile",
                 "⚙️ Manage System", "🤖 AI Reference Answers"
             ])
+            if selected != st.session_state.page:
+                st.session_state.page = selected
+                st.rerun()
     else:
-        page = "Welcome"
+        if st.session_state.page != "Welcome":
+            st.session_state.page = "Welcome"
 
-# ========== WELCOME PAGE ==========
-if page == "Welcome":
+# ========== MAIN CONTENT ==========
+if st.session_state.page == "Welcome":
     st.header("Welcome to Student Evaluation System")
     col1, col2 = st.columns(2)
 
@@ -1502,8 +1462,7 @@ elif st.session_state.user_role == "student":
     current_streak = student[8]
     best_streak = student[9]
     
-    # Edit Registration Page
-    if 'page' in st.session_state and st.session_state.page == "edit_registration":
+    if st.session_state.page == "edit_registration":
         st.header("✏️ Edit Your Registration Details")
         st.info("Update your personal information below. Registration number cannot be changed.")
         
@@ -1535,11 +1494,9 @@ elif st.session_state.user_role == "student":
                     st.session_state.page = "🏠 Dashboard"
                     st.rerun()
         
-        # Show warning about subject registration
         st.info("📚 Note: Changing your class may affect which subjects are available to you. You can manage your subject registrations in the 'My Subjects' page.")
         
-    # Dashboard
-    elif page == "🏠 Dashboard":
+    elif st.session_state.page == "🏠 Dashboard":
         st.header(f"Welcome back, {student_name}! 👋")
 
         col1, col2, col3, col4 = st.columns(4)
@@ -1584,7 +1541,6 @@ elif st.session_state.user_role == "student":
         else:
             st.info("No recent activity found. Start submitting!")
 
-        # Show AI submission review if available
         if st.session_state.submission_review:
             with st.expander("📊 Latest AI Submission Analysis", expanded=True):
                 review = st.session_state.submission_review
@@ -1598,7 +1554,7 @@ elif st.session_state.user_role == "student":
                 st.info(f"📝 **AI Feedback:**\n{review['feedback']}")
 
     # My Subjects
-    elif page == "📚 My Subjects":
+    elif st.session_state.page == "📚 My Subjects":
         st.header("📚 Subject Registration")
         tab1, tab2 = st.tabs(["➕ Register New Subjects", "📋 My Registered Subjects"])
 
@@ -1658,7 +1614,7 @@ elif st.session_state.user_role == "student":
                 st.info("You haven't registered for any subjects yet.")
 
     # New Submission with AI
-    elif page == "➕ New Submission":
+    elif st.session_state.page == "➕ New Submission":
         st.header("New Submission - AI Powered!")
         if not SKLEARN_AVAILABLE:
             st.warning("⚠️ Running in basic mode. Install scikit-learn for advanced AI features.")
@@ -1722,7 +1678,7 @@ elif st.session_state.user_role == "student":
                         st.error("Please fill all required fields (*)")
 
     # Extra Activity
-    elif page == "➕ Extra Activity":
+    elif st.session_state.page == "➕ Extra Activity":
         st.header("Add Extra Activity")
         st.success("🎯 Extra Activities earn **25 points** each!")
 
@@ -1763,7 +1719,7 @@ elif st.session_state.user_role == "student":
                     st.error("Please enter topic")
 
     # My Submissions
-    elif page == "📋 My Submissions":
+    elif st.session_state.page == "📋 My Submissions":
         st.header("My Submissions")
         df = get_student_submissions(student_id)
 
@@ -1796,7 +1752,6 @@ elif st.session_state.user_role == "student":
                         if row['teacher_feedback']:
                             st.write(f"**Teacher Feedback:** {row['teacher_feedback']}")
                     
-                    # AI Analysis
                     if row['ai_confidence'] > 0:
                         st.markdown("---")
                         st.write("**🤖 AI Analysis:**")
@@ -1838,7 +1793,7 @@ elif st.session_state.user_role == "student":
             st.info("No submissions found.")
 
     # My Uploads
-    elif page == "📂 My Uploads":
+    elif st.session_state.page == "📂 My Uploads":
         st.header("📂 My Uploaded Files")
 
         tab1, tab2 = st.tabs(["📤 Submissions", "🎯 Activities"])
@@ -1905,7 +1860,7 @@ elif st.session_state.user_role == "student":
                 del st.session_state.view_content
 
     # Daily Activity
-    elif page == "📈 Daily Activity":
+    elif st.session_state.page == "📈 Daily Activity":
         st.header("Daily Activity Tracker")
         col1, col2 = st.columns(2)
         with col1:
@@ -1936,7 +1891,7 @@ elif st.session_state.user_role == "student":
             st.info("No activity recorded for the selected period.")
 
     # Leaderboard
-    elif page == "🏆 Leaderboard":
+    elif st.session_state.page == "🏆 Leaderboard":
         st.header("🏆 Student Leaderboard")
         col1, col2 = st.columns(2)
         with col1:
@@ -1963,7 +1918,7 @@ elif st.session_state.user_role == "student":
             st.info("No students found in the leaderboard.")
 
     # Rewards
-    elif page == "🎁 Rewards":
+    elif st.session_state.page == "🎁 Rewards":
         st.header("🎁 Reward Store")
         st.info(f"💰 You have **{total_points} points** available")
 
@@ -2000,7 +1955,7 @@ elif st.session_state.user_role == "student":
                 st.markdown("---")
 
     # Edit Profile
-    elif page == "👤 Edit Profile":
+    elif st.session_state.page == "👤 Edit Profile":
         st.header("Edit Profile")
         with st.form("edit_profile_form"):
             name = st.text_input("Full Name", value=student_name)
@@ -2016,6 +1971,7 @@ elif st.session_state.user_role == "student":
                             st.success("✅ Profile updated successfully! Please login again.")
                             st.session_state.current_student = None
                             st.session_state.user_role = None
+                            st.session_state.page = "Welcome"
                             st.rerun()
                     else:
                         st.error("Passwords do not match!")
@@ -2041,8 +1997,7 @@ elif st.session_state.user_role == "teacher":
     teacher_email = teacher[3]
     teacher_dept = teacher[5]
 
-    # Teacher Dashboard
-    if page == "🏠 Teacher Dashboard":
+    if st.session_state.page == "🏠 Teacher Dashboard":
         st.header(f"Teacher Dashboard 👨‍🏫")
         conn = get_db_connection()
         try:
@@ -2085,7 +2040,7 @@ elif st.session_state.user_role == "teacher":
             st.dataframe(class_dist, use_container_width=True)
 
     # Subject Management
-    elif page == "📚 Subject Management":
+    elif st.session_state.page == "📚 Subject Management":
         st.header("📚 Subject Management")
         tab1, tab2, tab3 = st.tabs(["➕ Create Subject", "📋 My Subjects", "👥 Assign Teachers"])
 
@@ -2158,7 +2113,7 @@ elif st.session_state.user_role == "teacher":
                     st.info("No unassigned subjects available.")
 
     # Manage Students (with Faculty Edit)
-    elif page == "👨‍🎓 Manage Students":
+    elif st.session_state.page == "👨‍🎓 Manage Students":
         st.header("Manage Students")
         st.info("👨‍🏫 Faculty: You can edit all student details including registration number and password.")
         
@@ -2229,7 +2184,7 @@ elif st.session_state.user_role == "teacher":
             st.info("No students found.")
 
     # View Submissions with AI data
-    elif page == "📂 View Submissions":
+    elif st.session_state.page == "📂 View Submissions":
         st.header("📂 Student Submissions with AI Analysis")
 
         submissions_df = get_all_submissions_for_teacher()
@@ -2260,7 +2215,6 @@ elif st.session_state.user_role == "teacher":
                     with col2:
                         st.write(f"**Date:** {row['date']}")
                     
-                    # AI Analysis
                     if row['ai_confidence'] > 0:
                         st.markdown("---")
                         st.write("**🤖 AI Analysis:**")
@@ -2294,7 +2248,7 @@ elif st.session_state.user_role == "teacher":
             st.info("No submissions found.")
 
     # AI Reference Answers Management
-    elif page == "🤖 AI Reference Answers":
+    elif st.session_state.page == "🤖 AI Reference Answers":
         st.header("🤖 AI Reference Answers Management")
         if not SKLEARN_AVAILABLE:
             st.warning("⚠️ scikit-learn not installed. AI similarity features will use basic word matching.")
@@ -2344,7 +2298,7 @@ elif st.session_state.user_role == "teacher":
                 conn.close()
 
     # Class Analytics
-    elif page == "📊 Class Analytics":
+    elif st.session_state.page == "📊 Class Analytics":
         st.header("Class Analytics")
         conn = get_db_connection()
         class_performance = pd.read_sql_query('''
@@ -2359,7 +2313,6 @@ elif st.session_state.user_role == "teacher":
             st.subheader("📈 Class Performance")
             st.dataframe(class_performance, use_container_width=True)
 
-        # AI Performance Analytics
         st.subheader("🤖 AI Performance Metrics")
         ai_metrics = pd.read_sql_query('''
             SELECT 
@@ -2393,7 +2346,7 @@ elif st.session_state.user_role == "teacher":
         conn.close()
 
     # Leaderboard
-    elif page == "🏆 Leaderboard":
+    elif st.session_state.page == "🏆 Leaderboard":
         st.header("Teacher View: Student Leaderboard")
         leaderboard = get_leaderboard(50)
         if not leaderboard.empty:
@@ -2402,7 +2355,7 @@ elif st.session_state.user_role == "teacher":
             st.info("No students in leaderboard.")
 
     # Edit Profile
-    elif page == "👤 Edit Profile":
+    elif st.session_state.page == "👤 Edit Profile":
         st.header("Edit Profile")
         with st.form("edit_teacher_profile_form"):
             name = st.text_input("Full Name", value=teacher_name)
@@ -2418,6 +2371,7 @@ elif st.session_state.user_role == "teacher":
                             st.success("✅ Profile updated successfully! Please login again.")
                             st.session_state.current_teacher = None
                             st.session_state.user_role = None
+                            st.session_state.page = "Welcome"
                             st.rerun()
                     else:
                         st.error("Passwords do not match!")
@@ -2432,7 +2386,7 @@ elif st.session_state.user_role == "teacher":
                         st.rerun()
 
     # Manage System
-    elif page == "⚙️ Manage System":
+    elif st.session_state.page == "⚙️ Manage System":
         st.header("System Management")
         tab1, tab2 = st.tabs(["📊 System Stats", "⚙️ Settings"])
         with tab1:
