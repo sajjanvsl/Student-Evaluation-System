@@ -11,8 +11,15 @@ import base64
 import time
 import re
 import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+
+# Try to import sklearn, but provide fallback if not available
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    st.warning("⚠️ scikit-learn not installed. AI features will use basic analysis only.")
 
 st.set_page_config(page_title="Student Evaluation System", page_icon="📚", layout="wide", initial_sidebar_state="expanded")
 
@@ -387,7 +394,7 @@ def cleanup_old_data():
     finally:
         conn.close()
 
-# ---------- AI Validation Functions ----------
+# ---------- AI Validation Functions (with fallback) ----------
 def validate_submission_with_ai(submission_text, subject, topic=None):
     """
     Validate student submission using AI techniques:
@@ -395,13 +402,17 @@ def validate_submission_with_ai(submission_text, subject, topic=None):
     2. Keyword relevance scoring
     3. Plagiarism detection (against reference answers)
     4. Content quality assessment
+    
+    Falls back to basic analysis if scikit-learn is not available.
     """
     if not submission_text or len(submission_text.strip()) < 10:
         return {
             'confidence': 0.3,
             'feedback': "Submission is too short. Please provide more detailed content.",
             'plagiarism_score': 0.0,
-            'quality_score': 0.3
+            'quality_score': 0.3,
+            'word_count': len(submission_text.split()),
+            'keyword_score': 0.0
         }
     
     # Basic metrics
@@ -425,9 +436,9 @@ def validate_submission_with_ai(submission_text, subject, topic=None):
     references = [row[0] for row in c.fetchall()]
     conn.close()
     
-    # Calculate similarity with reference answers
+    # Calculate similarity with reference answers (if sklearn available)
     similarity_scores = []
-    if references:
+    if references and SKLEARN_AVAILABLE:
         try:
             vectorizer = TfidfVectorizer(stop_words='english')
             all_texts = [submission_text] + references
@@ -436,16 +447,27 @@ def validate_submission_with_ai(submission_text, subject, topic=None):
             similarity_scores = similarity_matrix.flatten().tolist()
         except:
             similarity_scores = []
+    elif references and not SKLEARN_AVAILABLE:
+        # Basic word overlap similarity (fallback)
+        submission_words = set(submission_text.lower().split())
+        for ref in references:
+            ref_words = set(ref.lower().split())
+            if len(submission_words) > 0 and len(ref_words) > 0:
+                overlap = len(submission_words.intersection(ref_words))
+                total = len(submission_words.union(ref_words))
+                similarity_scores.append(overlap / total if total > 0 else 0)
+            else:
+                similarity_scores.append(0)
     
     # Calculate plagiarism score (max similarity)
     plagiarism_score = max(similarity_scores) if similarity_scores else 0.0
     
     # Extract keywords (simple version)
     common_keywords = {
-        'Database Management': ['sql', 'query', 'table', 'database', 'normalization', 'index'],
-        'Web Technologies': ['html', 'css', 'javascript', 'web', 'browser', 'server'],
-        'Python Programming': ['python', 'variable', 'function', 'class', 'loop', 'list'],
-        'General': ['example', 'explain', 'define', 'describe', 'compare']
+        'Database Management': ['sql', 'query', 'table', 'database', 'normalization', 'index', 'data', 'server'],
+        'Web Technologies': ['html', 'css', 'javascript', 'web', 'browser', 'server', 'client', 'http'],
+        'Python Programming': ['python', 'variable', 'function', 'class', 'loop', 'list', 'dict', 'import'],
+        'General': ['example', 'explain', 'define', 'describe', 'compare', 'analyze', 'discuss']
     }
     
     # Get relevant keywords for this subject
@@ -488,6 +510,9 @@ def validate_submission_with_ai(submission_text, subject, topic=None):
     
     if structure_score < 0.5:
         feedback_parts.append("• Consider organizing your response into clearer sentences/paragraphs.")
+    
+    if not SKLEARN_AVAILABLE:
+        feedback_parts.append("• Note: Advanced AI features limited (scikit-learn not installed).")
     
     feedback = "\n".join(feedback_parts)
     
@@ -1233,6 +1258,10 @@ Path("uploads").mkdir(exist_ok=True)
 st.title("📚 Continuous Student Evaluation & Monitoring System")
 st.markdown("---")
 
+# Show sklearn availability warning if needed
+if not SKLEARN_AVAILABLE:
+    st.sidebar.warning("⚠️ Advanced AI features limited. Install scikit-learn for full functionality.")
+
 # Sidebar
 with st.sidebar:
     if st.session_state.user_role:
@@ -1631,6 +1660,8 @@ elif st.session_state.user_role == "student":
     # New Submission with AI
     elif page == "➕ New Submission":
         st.header("New Submission - AI Powered!")
+        if not SKLEARN_AVAILABLE:
+            st.warning("⚠️ Running in basic mode. Install scikit-learn for advanced AI features.")
         st.info("✅ Your submission will be analyzed by AI for quality and originality.")
 
         subjects_df = get_student_subjects(student_id)
@@ -2265,6 +2296,8 @@ elif st.session_state.user_role == "teacher":
     # AI Reference Answers Management
     elif page == "🤖 AI Reference Answers":
         st.header("🤖 AI Reference Answers Management")
+        if not SKLEARN_AVAILABLE:
+            st.warning("⚠️ scikit-learn not installed. AI similarity features will use basic word matching.")
         st.info("Add reference answers to help the AI validate student submissions more accurately.")
         
         tab1, tab2 = st.tabs(["➕ Add Reference Answer", "📋 View Reference Answers"])
