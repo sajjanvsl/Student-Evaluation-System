@@ -513,14 +513,15 @@ def add_student_with_password(reg_no, name, class_name, email, password, phone=N
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        reg_no = reg_no.strip()
+        email = email.strip().lower()
         password_hash = hash_password(password)
-        c.execute("SELECT reg_no, email FROM students WHERE reg_no = ? OR email = ?", (reg_no, email))
+        
+        # Check duplicates (case-insensitive)
+        c.execute("SELECT reg_no, email FROM students WHERE reg_no = ? COLLATE NOCASE OR email = ?", (reg_no, email))
         existing = c.fetchone()
         if existing:
-            if existing[0] == reg_no:
-                st.error("Registration number already exists!")
-            elif existing[1] == email:
-                st.error("Email already exists!")
+            st.error("Registration number or email already exists!")
             return False
 
         c.execute('''
@@ -540,9 +541,10 @@ def edit_student_registration(student_id, name, class_name, email, phone):
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        email = email.strip().lower()
+        # Check if email is already used by another student
         c.execute("SELECT student_id FROM students WHERE email = ? AND student_id != ?", (email, student_id))
-        existing = c.fetchone()
-        if existing:
+        if c.fetchone():
             st.error("Email already exists for another student!")
             return False
 
@@ -553,6 +555,7 @@ def edit_student_registration(student_id, name, class_name, email, phone):
         ''', (name, class_name, email, phone, student_id))
         conn.commit()
         
+        # Update the session with new values
         c.execute("SELECT * FROM students WHERE student_id = ?", (student_id,))
         updated_student = c.fetchone()
         st.session_state.current_student = updated_student
@@ -569,15 +572,18 @@ def faculty_edit_student(student_id, reg_no, name, class_name, email, phone, pas
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        c.execute("SELECT student_id FROM students WHERE reg_no = ? AND student_id != ?", (reg_no, student_id))
-        existing_reg = c.fetchone()
-        if existing_reg:
+        reg_no = reg_no.strip()
+        email = email.strip().lower()
+        
+        # Check if reg_no is already used by another student (case-insensitive)
+        c.execute("SELECT student_id FROM students WHERE reg_no = ? COLLATE NOCASE AND student_id != ?", (reg_no, student_id))
+        if c.fetchone():
             st.error("Registration number already exists for another student!")
             return False
         
+        # Check if email is already used by another student
         c.execute("SELECT student_id FROM students WHERE email = ? AND student_id != ?", (email, student_id))
-        existing_email = c.fetchone()
-        if existing_email:
+        if c.fetchone():
             st.error("Email already exists for another student!")
             return False
         
@@ -606,14 +612,23 @@ def faculty_edit_student(student_id, reg_no, name, class_name, email, phone, pas
 def authenticate_student(login_id, password, use_regno=False):
     conn = get_db_connection()
     c = conn.cursor()
+    # Get column names
+    c.execute("PRAGMA table_info(students)")
+    columns = [col[1] for col in c.fetchall()]
+    
     if use_regno:
-        c.execute("SELECT * FROM students WHERE reg_no = ?", (login_id,))
+        c.execute("SELECT * FROM students WHERE reg_no = ?", (login_id.strip(),))
     else:
-        c.execute("SELECT * FROM students WHERE email = ?", (login_id,))
+        c.execute("SELECT * FROM students WHERE email = ?", (login_id.strip().lower(),))
     student = c.fetchone()
     conn.close()
-    if student and student[6] == hash_password(password):
-        return student
+    
+    if student:
+        # Create dictionary mapping column name to value
+        student_dict = dict(zip(columns, student))
+        stored_hash = student_dict['password']
+        if stored_hash == hash_password(password):
+            return student  # return tuple for backward compatibility
     return None
 
 def update_student_profile(student_id, name, email, phone, password=None):
@@ -642,7 +657,7 @@ def update_student_profile(student_id, name, email, phone, password=None):
 def get_student(reg_no):
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM students WHERE reg_no = ?", (reg_no,))
+    c.execute("SELECT * FROM students WHERE reg_no = ?", (reg_no.strip(),))
     student = c.fetchone()
     conn.close()
     return student
@@ -661,6 +676,8 @@ def register_teacher_with_password(teacher_code, name, email, password, departme
     c = conn.cursor()
     try:
         pwd_hash = hash_password(password)
+        email = email.strip().lower()
+        teacher_code = teacher_code.strip()
         c.execute('''
             INSERT INTO teachers (teacher_code, name, email, password, department)
             VALUES (?, ?, ?, ?, ?)
@@ -675,11 +692,16 @@ def register_teacher_with_password(teacher_code, name, email, password, departme
 def authenticate_teacher(email, password):
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM teachers WHERE email = ?", (email,))
+    c.execute("PRAGMA table_info(teachers)")
+    columns = [col[1] for col in c.fetchall()]
+    c.execute("SELECT * FROM teachers WHERE email = ?", (email.strip().lower(),))
     teacher = c.fetchone()
     conn.close()
-    if teacher and teacher[4] == hash_password(password):
-        return teacher
+    if teacher:
+        teacher_dict = dict(zip(columns, teacher))
+        stored_hash = teacher_dict['password']
+        if stored_hash == hash_password(password):
+            return teacher
     return None
 
 def update_teacher_profile(teacher_id, name, email, department, password=None):
@@ -691,12 +713,12 @@ def update_teacher_profile(teacher_id, name, email, department, password=None):
             c.execute('''
                 UPDATE teachers SET name = ?, email = ?, department = ?, password = ?
                 WHERE teacher_id = ?
-            ''', (name, email, department, pwd_hash, teacher_id))
+            ''', (name, email.strip().lower(), department, pwd_hash, teacher_id))
         else:
             c.execute('''
                 UPDATE teachers SET name = ?, email = ?, department = ?
                 WHERE teacher_id = ?
-            ''', (name, email, department, teacher_id))
+            ''', (name, email.strip().lower(), department, teacher_id))
         conn.commit()
         return True
     except Exception as e:
@@ -723,7 +745,7 @@ def add_subject(subject_code, subject_name, class_name, teacher_id=None):
         c.execute('''
             INSERT INTO subjects (subject_code, subject_name, class, teacher_id)
             VALUES (?, ?, ?, ?)
-        ''', (subject_code, subject_name, class_name, teacher_id))
+        ''', (subject_code.strip(), subject_name, class_name, teacher_id))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
@@ -860,7 +882,7 @@ def forgot_password(email, user_type):
 def reset_password(email, new_password):
     conn = get_db_connection()
     c = conn.cursor()
-
+    email = email.strip().lower()
     c.execute("SELECT student_id FROM students WHERE email = ?", (email,))
     student = c.fetchone()
     if student:
@@ -1219,13 +1241,20 @@ with st.sidebar:
         if st.session_state.user_role == "student":
             student = st.session_state.current_student
             if student:
+                # Get column names for safe indexing
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("PRAGMA table_info(students)")
+                columns = [col[1] for col in c.fetchall()]
+                conn.close()
+                student_dict = dict(zip(columns, student))
                 st.header("🎓 Student Info")
-                st.success(f"**{student[2]}**")
-                st.info(f"Reg No: {student[1]}")
-                st.info(f"Class: {student[3]}")
-                st.info(f"Email: {student[4]}")
-                st.info(f"Points: {student[7]} 🏆")
-                st.info(f"Streak: {student[8]} days 🔥")
+                st.success(f"**{student_dict.get('name', '')}**")
+                st.info(f"Reg No: {student_dict.get('reg_no', '')}")
+                st.info(f"Class: {student_dict.get('class', '')}")
+                st.info(f"Email: {student_dict.get('email', '')}")
+                st.info(f"Points: {student_dict.get('total_points', 0)} 🏆")
+                st.info(f"Streak: {student_dict.get('current_streak', 0)} days 🔥")
                 if st.button("✏️ Edit Registration"):
                     st.session_state.page = "edit_registration"
                     st.rerun()
@@ -1237,10 +1266,16 @@ with st.sidebar:
         elif st.session_state.user_role == "teacher":
             teacher = st.session_state.current_teacher
             if teacher:
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("PRAGMA table_info(teachers)")
+                columns = [col[1] for col in c.fetchall()]
+                conn.close()
+                teacher_dict = dict(zip(columns, teacher))
                 st.header("👨‍🏫 Teacher Info")
-                st.success(f"**Prof. {teacher[2]}**")
-                st.info(f"Email: {teacher[3]}")
-                st.info(f"Dept: {teacher[5]}")
+                st.success(f"**Prof. {teacher_dict.get('name', '')}**")
+                st.info(f"Email: {teacher_dict.get('email', '')}")
+                st.info(f"Dept: {teacher_dict.get('department', '')}")
             if st.button("Logout"):
                 st.session_state.current_teacher = None
                 st.session_state.user_role = None
@@ -1452,15 +1487,22 @@ elif st.session_state.user_role == "student":
         st.error("Please login first!")
         st.stop()
 
-    student_id = student[0]
-    student_reg = student[1]
-    student_name = student[2]
-    student_class = student[3]
-    student_email = student[4]
-    student_phone = student[5]
-    total_points = student[7]
-    current_streak = student[8]
-    best_streak = student[9]
+    # Get column names for this student
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(students)")
+    columns = [col[1] for col in c.fetchall()]
+    conn.close()
+    student_dict = dict(zip(columns, student))
+    student_id = student_dict['student_id']
+    student_reg = student_dict['reg_no']
+    student_name = student_dict['name']
+    student_class = student_dict['class']
+    student_email = student_dict['email']
+    student_phone = student_dict['phone']
+    total_points = student_dict['total_points']
+    current_streak = student_dict['current_streak']
+    best_streak = student_dict['best_streak']
     
     if st.session_state.page == "edit_registration":
         st.header("✏️ Edit Your Registration Details")
@@ -1979,6 +2021,7 @@ elif st.session_state.user_role == "student":
                     if update_student_profile(student_id, name, email, phone):
                         st.success("✅ Profile updated successfully!")
                         student = list(student)
+                        # Update session with new values
                         student[2] = name
                         student[4] = email
                         student[5] = phone
@@ -1992,10 +2035,16 @@ elif st.session_state.user_role == "teacher":
         st.error("Please login first!")
         st.stop()
 
-    teacher_id = teacher[0]
-    teacher_name = teacher[2]
-    teacher_email = teacher[3]
-    teacher_dept = teacher[5]
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(teachers)")
+    columns = [col[1] for col in c.fetchall()]
+    conn.close()
+    teacher_dict = dict(zip(columns, teacher))
+    teacher_id = teacher_dict['teacher_id']
+    teacher_name = teacher_dict['name']
+    teacher_email = teacher_dict['email']
+    teacher_dept = teacher_dict['department']
 
     if st.session_state.page == "🏠 Teacher Dashboard":
         st.header(f"Teacher Dashboard 👨‍🏫")
