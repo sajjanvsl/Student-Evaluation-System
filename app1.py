@@ -9,6 +9,10 @@ import string
 import os
 import base64
 import time
+import re
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 st.set_page_config(page_title="Student Evaluation System", page_icon="📚", layout="wide", initial_sidebar_state="expanded")
 
@@ -25,6 +29,8 @@ if 'temp_password' not in st.session_state:
     st.session_state.temp_password = None
 if 'view_file' not in st.session_state:
     st.session_state.view_file = None
+if 'submission_review' not in st.session_state:
+    st.session_state.submission_review = None
 
 # ---------- Database Helper (prevents locks) ----------
 def get_db_connection():
@@ -70,7 +76,7 @@ def init_database():
     conn = get_db_connection()
     c = conn.cursor()
 
-    # Submissions table
+    # Submissions table with AI columns
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='submissions'")
     table_exists = c.fetchone()
     if table_exists:
@@ -84,6 +90,12 @@ def init_database():
             c.execute('ALTER TABLE submissions ADD COLUMN file_type TEXT')
         if 'file_size' not in columns:
             c.execute('ALTER TABLE submissions ADD COLUMN file_size INTEGER')
+        if 'ai_confidence' not in columns:
+            c.execute('ALTER TABLE submissions ADD COLUMN ai_confidence DECIMAL(3,2) DEFAULT 0')
+        if 'ai_feedback' not in columns:
+            c.execute('ALTER TABLE submissions ADD COLUMN ai_feedback TEXT')
+        if 'plagiarism_score' not in columns:
+            c.execute('ALTER TABLE submissions ADD COLUMN plagiarism_score DECIMAL(3,2) DEFAULT 0')
     else:
         c.execute('''
             CREATE TABLE submissions (
@@ -106,7 +118,10 @@ def init_database():
                 submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 graded_at TIMESTAMP,
                 graded_by INTEGER,
-                auto_graded INTEGER DEFAULT 0
+                auto_graded INTEGER DEFAULT 0,
+                ai_confidence DECIMAL(3,2) DEFAULT 0,
+                ai_feedback TEXT,
+                plagiarism_score DECIMAL(3,2) DEFAULT 0
             )
         ''')
 
@@ -267,6 +282,20 @@ def init_database():
             )
         ''')
 
+    # Sample reference answers table for AI validation
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='reference_answers'")
+    if not c.fetchone():
+        c.execute('''
+            CREATE TABLE reference_answers (
+                answer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                answer_text TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by INTEGER
+            )
+        ''')
+
     # Indexes
     try:
         c.execute('CREATE INDEX IF NOT EXISTS idx_submissions_date ON submissions(date)')
@@ -274,6 +303,7 @@ def init_database():
         c.execute('CREATE INDEX IF NOT EXISTS idx_submissions_student ON submissions(student_id)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_activities_student ON activities(student_id)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_student_subjects ON student_subjects(student_id, subject_id)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_reference_answers ON reference_answers(subject, topic)')
     except:
         pass
 
@@ -305,6 +335,22 @@ def ensure_test_users():
             VALUES (?, ?, ?, ?, ?)
         ''', ("T001", "Test Teacher", "test@teacher.com", teacher_hash, "Computer Science"))
         print("✅ Test teacher created.")
+
+    # Add some sample reference answers
+    c.execute("SELECT COUNT(*) FROM reference_answers")
+    if c.fetchone()[0] == 0:
+        sample_answers = [
+            ("Database Management", "SQL Basics", "SQL is a standard language for storing, manipulating and retrieving data in databases. Key commands include SELECT, INSERT, UPDATE, DELETE."),
+            ("Database Management", "Normalization", "Normalization is the process of organizing data to reduce redundancy. Normal forms include 1NF, 2NF, 3NF, and BCNF."),
+            ("Web Technologies", "HTML", "HTML (HyperText Markup Language) is the standard markup language for creating web pages and web applications."),
+            ("Python Programming", "Variables", "Variables are containers for storing data values. Python has no command for declaring a variable."),
+        ]
+        for subject, topic, answer in sample_answers:
+            c.execute('''
+                INSERT INTO reference_answers (subject, topic, answer_text)
+                VALUES (?, ?, ?)
+            ''', (subject, topic, answer))
+        print("✅ Sample reference answers added.")
 
     conn.commit()
     conn.close()
@@ -341,6 +387,136 @@ def cleanup_old_data():
     finally:
         conn.close()
 
+# ---------- AI Validation Functions ----------
+def validate_submission_with_ai(submission_text, subject, topic=None):
+    """
+    Validate student submission using AI techniques:
+    1. Length and structure analysis
+    2. Keyword relevance scoring
+    3. Plagiarism detection (against reference answers)
+    4. Content quality assessment
+    """
+    if not submission_text or len(submission_text.strip()) < 10:
+        return {
+            'confidence': 0.3,
+            'feedback': "Submission is too short. Please provide more detailed content.",
+            'plagiarism_score': 0.0,
+            'quality_score': 0.3
+        }
+    
+    # Basic metrics
+    word_count = len(submission_text.split())
+    sentence_count = len(re.findall(r'[.!?]+', submission_text))
+    avg_word_length = np.mean([len(word) for word in submission_text.split()]) if word_count > 0 else 0
+    
+    # Get reference answers for this subject/topic
+    conn = get_db_connection()
+    c = conn.cursor()
+    if topic:
+        c.execute('''
+            SELECT answer_text FROM reference_answers 
+            WHERE subject = ? AND topic = ?
+        ''', (subject, topic))
+    else:
+        c.execute('''
+            SELECT answer_text FROM reference_answers 
+            WHERE subject = ?
+        ''', (subject,))
+    references = [row[0] for row in c.fetchall()]
+    conn.close()
+    
+    # Calculate similarity with reference answers
+    similarity_scores = []
+    if references:
+        try:
+            vectorizer = TfidfVectorizer(stop_words='english')
+            all_texts = [submission_text] + references
+            tfidf_matrix = vectorizer.fit_transform(all_texts)
+            similarity_matrix = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])
+            similarity_scores = similarity_matrix.flatten().tolist()
+        except:
+            similarity_scores = []
+    
+    # Calculate plagiarism score (max similarity)
+    plagiarism_score = max(similarity_scores) if similarity_scores else 0.0
+    
+    # Extract keywords (simple version)
+    common_keywords = {
+        'Database Management': ['sql', 'query', 'table', 'database', 'normalization', 'index'],
+        'Web Technologies': ['html', 'css', 'javascript', 'web', 'browser', 'server'],
+        'Python Programming': ['python', 'variable', 'function', 'class', 'loop', 'list'],
+        'General': ['example', 'explain', 'define', 'describe', 'compare']
+    }
+    
+    # Get relevant keywords for this subject
+    keywords = common_keywords.get(subject, common_keywords['General'])
+    
+    # Calculate keyword relevance
+    submission_lower = submission_text.lower()
+    keyword_matches = sum(1 for keyword in keywords if keyword in submission_lower)
+    keyword_score = keyword_matches / len(keywords) if keywords else 0.5
+    
+    # Quality score based on multiple factors
+    length_score = min(word_count / 100, 1.0)  # Max score at 100 words
+    structure_score = min(sentence_count / 5, 1.0)  # Max score at 5 sentences
+    
+    # Combined quality score
+    quality_score = (length_score * 0.3 + structure_score * 0.2 + keyword_score * 0.5)
+    
+    # Confidence score (0-1)
+    confidence = quality_score * 0.7 + (1 - plagiarism_score) * 0.3
+    
+    # Generate AI feedback
+    feedback_parts = []
+    
+    if word_count < 50:
+        feedback_parts.append("• Your submission could be more detailed. Aim for at least 50-100 words.")
+    elif word_count > 200:
+        feedback_parts.append("• Good length! Your submission is comprehensive.")
+    
+    if plagiarism_score > 0.7:
+        feedback_parts.append("⚠️ High similarity with reference materials detected. Please use your own words.")
+    elif plagiarism_score > 0.4:
+        feedback_parts.append("• Moderate similarity with reference materials. Try to paraphrase more.")
+    else:
+        feedback_parts.append("✓ Good originality in your response.")
+    
+    if keyword_score < 0.3:
+        feedback_parts.append("• Missing key terminology. Try to include more subject-specific terms.")
+    elif keyword_score > 0.7:
+        feedback_parts.append("✓ Excellent use of subject terminology!")
+    
+    if structure_score < 0.5:
+        feedback_parts.append("• Consider organizing your response into clearer sentences/paragraphs.")
+    
+    feedback = "\n".join(feedback_parts)
+    
+    return {
+        'confidence': round(confidence, 2),
+        'feedback': feedback,
+        'plagiarism_score': round(plagiarism_score, 2),
+        'quality_score': round(quality_score, 2),
+        'word_count': word_count,
+        'keyword_score': round(keyword_score, 2)
+    }
+
+def add_reference_answer(subject, topic, answer_text, teacher_id):
+    """Add a reference answer for AI validation."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute('''
+            INSERT INTO reference_answers (subject, topic, answer_text, created_by)
+            VALUES (?, ?, ?, ?)
+        ''', (subject, topic, answer_text, teacher_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        st.error(f"Error adding reference answer: {str(e)}")
+        return False
+    finally:
+        conn.close()
+
 # ---------- Student Functions ----------
 def add_student_with_password(reg_no, name, class_name, email, password, phone=None):
     conn = get_db_connection()
@@ -368,7 +544,7 @@ def add_student_with_password(reg_no, name, class_name, email, password, phone=N
     finally:
         conn.close()
 
-# Function to edit student registration details
+# Student self-edit function
 def edit_student_registration(student_id, name, class_name, email, phone):
     """Update student registration details (excluding password and reg_no)."""
     conn = get_db_connection()
@@ -396,6 +572,48 @@ def edit_student_registration(student_id, name, class_name, email, phone):
         return True
     except Exception as e:
         st.error(f"Error updating registration: {str(e)}")
+        return False
+    finally:
+        conn.close()
+
+# Faculty edit student function
+def faculty_edit_student(student_id, reg_no, name, class_name, email, phone, password=None):
+    """Faculty can edit all student details including registration number and password."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # Check if reg_no is already used by another student
+        c.execute("SELECT student_id FROM students WHERE reg_no = ? AND student_id != ?", (reg_no, student_id))
+        existing_reg = c.fetchone()
+        if existing_reg:
+            st.error("Registration number already exists for another student!")
+            return False
+        
+        # Check if email is already used by another student
+        c.execute("SELECT student_id FROM students WHERE email = ? AND student_id != ?", (email, student_id))
+        existing_email = c.fetchone()
+        if existing_email:
+            st.error("Email already exists for another student!")
+            return False
+        
+        if password:
+            password_hash = hash_password(password)
+            c.execute('''
+                UPDATE students 
+                SET reg_no = ?, name = ?, class = ?, email = ?, phone = ?, password = ?
+                WHERE student_id = ?
+            ''', (reg_no, name, class_name, email, phone, password_hash, student_id))
+        else:
+            c.execute('''
+                UPDATE students 
+                SET reg_no = ?, name = ?, class = ?, email = ?, phone = ?
+                WHERE student_id = ?
+            ''', (reg_no, name, class_name, email, phone, student_id))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        st.error(f"Error updating student: {str(e)}")
         return False
     finally:
         conn.close()
@@ -738,11 +956,18 @@ def get_auto_grade_letter(submission_type):
     }
     return mapping.get(submission_type, 'A')
 
-def add_submission(student_id, submission_type, subject, title, description, date,
-                   file_path=None, file_name=None, file_type=None, file_size=None):
+def add_submission_with_ai(student_id, submission_type, subject, title, description, date,
+                           file_path=None, file_name=None, file_type=None, file_size=None):
+    """Add submission with AI validation and auto-grading."""
     points = get_auto_grade_points(submission_type)
     grade = get_auto_grade_letter(submission_type)
-
+    
+    # AI validation
+    ai_result = validate_submission_with_ai(description, subject)
+    
+    # Adjust points based on AI confidence
+    adjusted_points = points * ai_result['confidence']
+    
     conn = get_db_connection()
     c = conn.cursor()
     try:
@@ -751,16 +976,18 @@ def add_submission(student_id, submission_type, subject, title, description, dat
                 student_id, submission_type, subject, title, description,
                 date, file_path, file_name, file_type, file_size,
                 max_points, points_earned, grade,
-                status, auto_graded, graded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Graded', 1, CURRENT_TIMESTAMP)
+                status, auto_graded, graded_at,
+                ai_confidence, ai_feedback, plagiarism_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Graded', 1, CURRENT_TIMESTAMP, ?, ?, ?)
         ''', (student_id, submission_type, subject, title, description,
               date, file_path, file_name, file_type, file_size,
-              points, points, grade))
+              points, adjusted_points, grade,
+              ai_result['confidence'], ai_result['feedback'], ai_result['plagiarism_score']))
 
         submission_id = c.lastrowid
 
         c.execute('UPDATE students SET total_points = total_points + ?, last_active = DATE("now") WHERE student_id = ?',
-                 (points, student_id))
+                 (adjusted_points, student_id))
 
         c.execute('SELECT last_active FROM students WHERE student_id = ?', (student_id,))
         result = c.fetchone()
@@ -775,10 +1002,14 @@ def add_submission(student_id, submission_type, subject, title, description, dat
         c.execute('''
             INSERT INTO point_transactions (student_id, transaction_type, points, description, reference_id)
             VALUES (?, 'Auto Graded', ?, ?, ?)
-        ''', (student_id, points, f"Auto-graded: {submission_type}", submission_id))
+        ''', (student_id, adjusted_points, f"AI-graded: {submission_type} (Conf: {ai_result['confidence']})", submission_id))
 
-        update_daily_activity(student_id, date, 'submission', points)
+        update_daily_activity(student_id, date, 'submission', adjusted_points)
         conn.commit()
+        
+        # Store AI result in session for display
+        st.session_state.submission_review = ai_result
+        
         return submission_id
     except Exception as e:
         st.error(f"Error adding submission: {str(e)}")
@@ -931,7 +1162,8 @@ def get_student_submissions(student_id):
         df = pd.read_sql_query('''
             SELECT submission_id, submission_type, subject, title, description, date, status,
                    points_earned, max_points, grade, teacher_feedback, graded_at,
-                   file_path, file_name, file_type, file_size
+                   file_path, file_name, file_type, file_size,
+                   ai_confidence, ai_feedback, plagiarism_score
             FROM submissions WHERE student_id = ? ORDER BY date DESC
         ''', conn, params=(student_id,))
         return df
@@ -960,6 +1192,7 @@ def get_all_submissions_for_teacher():
         df = pd.read_sql_query('''
             SELECT s.submission_id, s.submission_type, s.subject, s.title, s.date,
                    s.file_path, s.file_name, s.file_type, s.file_size,
+                   s.ai_confidence, s.ai_feedback, s.plagiarism_score,
                    st.name as student_name, st.reg_no, st.class
             FROM submissions s
             JOIN students st ON s.student_id = st.student_id
@@ -992,8 +1225,8 @@ def delete_student(student_id):
 
 # ---------- Initialise ----------
 init_database()
-ensure_test_users()  # Only creates test users if they don't exist
-cleanup_old_data()   # Only cleans up old submissions/activities, not user accounts
+ensure_test_users()
+cleanup_old_data()
 Path("uploads").mkdir(exist_ok=True)
 
 # ==================== STREAMLIT UI ====================
@@ -1152,7 +1385,7 @@ with st.sidebar:
             page = st.radio("Go to:", [
                 "🏠 Teacher Dashboard", "📚 Subject Management", "👨‍🎓 Manage Students",
                 "📂 View Submissions", "📊 Class Analytics", "🏆 Leaderboard", "👤 Edit Profile",
-                "⚙️ Manage System"
+                "⚙️ Manage System", "🤖 AI Reference Answers"
             ])
     else:
         page = "Welcome"
@@ -1167,7 +1400,7 @@ if page == "Welcome":
         st.write("- Register with email and password")
         st.write("- Choose your subjects (dynamic classes)")
         st.write("- Submit assignments and earn points")
-        st.write("- Auto-grading system")
+        st.write("- AI-powered validation system")
         st.write("- Track your progress")
 
         with st.expander("New Student Registration"):
@@ -1199,6 +1432,7 @@ if page == "Welcome":
         st.write("- Create and manage subjects")
         st.write("- Assign subjects to yourself")
         st.write("- Monitor student performance")
+        st.write("- Manage AI reference answers")
 
         with st.expander("Teacher Registration"):
             with st.form("teacher_reg_form"):
@@ -1214,7 +1448,7 @@ if page == "Welcome":
                         if t_password == t_confirm:
                             if register_teacher_with_password(t_code, t_name, t_email, t_password, t_dept):
                                 st.success("✅ Registration successful! Please login.")
-                                st.info("📚 After login, you can create and manage subjects.")
+                                st.info("📚 After login, you can create and manage subjects and AI reference answers.")
                             else:
                                 st.error("Teacher code or email already exists!")
                         else:
@@ -1239,7 +1473,7 @@ elif st.session_state.user_role == "student":
     current_streak = student[8]
     best_streak = student[9]
     
-    # NEW: Edit Registration Page
+    # Edit Registration Page
     if 'page' in st.session_state and st.session_state.page == "edit_registration":
         st.header("✏️ Edit Your Registration Details")
         st.info("Update your personal information below. Registration number cannot be changed.")
@@ -1321,6 +1555,19 @@ elif st.session_state.user_role == "student":
         else:
             st.info("No recent activity found. Start submitting!")
 
+        # Show AI submission review if available
+        if st.session_state.submission_review:
+            with st.expander("📊 Latest AI Submission Analysis", expanded=True):
+                review = st.session_state.submission_review
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("AI Confidence", f"{review['confidence']*100:.0f}%")
+                with col2:
+                    st.metric("Originality Score", f"{(1-review['plagiarism_score'])*100:.0f}%")
+                with col3:
+                    st.metric("Quality Score", f"{review['quality_score']*100:.0f}%")
+                st.info(f"📝 **AI Feedback:**\n{review['feedback']}")
+
     # My Subjects
     elif page == "📚 My Subjects":
         st.header("📚 Subject Registration")
@@ -1381,10 +1628,10 @@ elif st.session_state.user_role == "student":
             else:
                 st.info("You haven't registered for any subjects yet.")
 
-    # New Submission
+    # New Submission with AI
     elif page == "➕ New Submission":
-        st.header("New Submission - Auto Graded!")
-        st.info("✅ Your submissions will be automatically graded and points added instantly!")
+        st.header("New Submission - AI Powered!")
+        st.info("✅ Your submission will be analyzed by AI for quality and originality.")
 
         subjects_df = get_student_subjects(student_id)
         if subjects_df.empty:
@@ -1402,12 +1649,13 @@ elif st.session_state.user_role == "student":
                     title = st.text_input("Title*")
                     date = st.date_input("Date*", datetime.now().date())
                 with col2:
-                    points = get_auto_grade_points(submission_type)
-                    grade = get_auto_grade_letter(submission_type)
-                    st.success(f"📊 You will earn: **{points} points**")
-                    st.info(f"📝 Auto Grade: **{grade}**")
+                    base_points = get_auto_grade_points(submission_type)
+                    st.info(f"📊 Base points: **{base_points}**")
+                    st.info("🤖 AI will adjust points based on quality")
 
-                description = st.text_area("Description*", height=150, placeholder="Describe your submission...")
+                description = st.text_area("Description*", height=200, 
+                    placeholder="Write your detailed submission here... The AI will analyze your content for quality, relevance, and originality.")
+
                 uploaded_file = st.file_uploader("Upload File (optional)",
                     type=['pdf', 'docx', 'txt', 'jpg', 'png', 'zip', 'py', 'java', 'cpp'])
 
@@ -1430,13 +1678,13 @@ elif st.session_state.user_role == "student":
                             with open(file_path, "wb") as f:
                                 f.write(uploaded_file.getbuffer())
 
-                        submission_id = add_submission(student_id, submission_type, selected_subject,
-                                                      title, description, date,
-                                                      file_path, file_name, file_type, file_size)
+                        submission_id = add_submission_with_ai(student_id, submission_type, selected_subject,
+                                                              title, description, date,
+                                                              file_path, file_name, file_type, file_size)
                         if submission_id:
-                            st.success(f"✅ Submission graded automatically! You earned {points} points!")
+                            st.success("✅ Submission recorded! AI analysis complete.")
                             st.balloons()
-                            st.info(f"📝 Grade: {grade} | Points: {points}")
+                            st.rerun()
                         else:
                             st.error("Failed to record submission.")
                     else:
@@ -1492,14 +1740,17 @@ elif st.session_state.user_role == "student":
             total_subs = len(df)
             total_pts = df['points_earned'].sum()
             avg_pts = df['points_earned'].mean()
+            avg_confidence = df['ai_confidence'].mean()
 
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Total Submissions", total_subs)
             with col2:
                 st.metric("Total Points", total_pts)
             with col3:
                 st.metric("Avg Points", f"{avg_pts:.1f}")
+            with col4:
+                st.metric("Avg AI Confidence", f"{avg_confidence*100:.0f}%")
 
             for idx, row in df.iterrows():
                 with st.expander(f"📄 {row['title']} - {row['date']} (Grade: {row['grade']}, Points: {row['points_earned']})"):
@@ -1512,7 +1763,19 @@ elif st.session_state.user_role == "student":
                         st.write(f"**Status:** {row['status']}")
                         st.write(f"**Submitted:** {row['date']}")
                         if row['teacher_feedback']:
-                            st.write(f"**Feedback:** {row['teacher_feedback']}")
+                            st.write(f"**Teacher Feedback:** {row['teacher_feedback']}")
+                    
+                    # AI Analysis
+                    if row['ai_confidence'] > 0:
+                        st.markdown("---")
+                        st.write("**🤖 AI Analysis:**")
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("AI Confidence", f"{row['ai_confidence']*100:.0f}%")
+                        with col2:
+                            st.metric("Originality", f"{(1-row['plagiarism_score'])*100:.0f}%")
+                        if row['ai_feedback']:
+                            st.info(f"📝 **AI Feedback:**\n{row['ai_feedback']}")
 
                     if row['file_path'] and os.path.exists(row['file_path']):
                         st.markdown("---")
@@ -1863,40 +2126,50 @@ elif st.session_state.user_role == "teacher":
                 if unassigned_subjects.empty:
                     st.info("No unassigned subjects available.")
 
-    # Manage Students
+    # Manage Students (with Faculty Edit)
     elif page == "👨‍🎓 Manage Students":
         st.header("Manage Students")
+        st.info("👨‍🏫 Faculty: You can edit all student details including registration number and password.")
+        
         students_df = get_all_students()
         if not students_df.empty:
             st.subheader("All Students")
             st.dataframe(students_df[['reg_no', 'name', 'class', 'email', 'phone', 'total_points']],
                         use_container_width=True)
+            
             st.markdown("---")
-            st.subheader("Edit/Delete Student")
+            st.subheader("Edit Student Details (Faculty)")
+            
             col1, col2 = st.columns(2)
             with col1:
                 student_list = students_df['reg_no'].tolist()
                 selected_reg = st.selectbox("Select Student by Registration Number", student_list)
+                
                 if selected_reg:
                     student_data = students_df[students_df['reg_no'] == selected_reg].iloc[0]
                     student_id = student_data['student_id']
-                    with st.form("edit_student_form"):
+                    
+                    with st.form("faculty_edit_student_form"):
                         st.write(f"**Editing: {student_data['name']}**")
+                        reg_no = st.text_input("Registration Number", value=student_data['reg_no'])
                         name = st.text_input("Name", value=student_data['name'])
                         class_name = st.text_input("Class", value=student_data['class'])
                         email = st.text_input("Email", value=student_data['email'] if student_data['email'] else "")
                         phone = st.text_input("Phone", value=student_data['phone'] if student_data['phone'] else "")
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            if st.form_submit_button("💾 Update Student"):
-                                if update_student_profile(student_id, name, email, phone):
+                        
+                        st.subheader("Reset Password (Optional)")
+                        new_password = st.text_input("New Password", type="password", 
+                                                    help="Leave blank to keep current password")
+                        
+                        if st.form_submit_button("💾 Update Student"):
+                            if reg_no and name and class_name and email:
+                                if faculty_edit_student(student_id, reg_no, name, class_name, email, phone, 
+                                                      new_password if new_password else None):
                                     st.success("Student updated successfully!")
                                     st.rerun()
-                        with col2:
-                            if st.form_submit_button("🗑️ Delete Student"):
-                                if delete_student(student_id):
-                                    st.success("Student deleted successfully!")
-                                    st.rerun()
+                            else:
+                                st.error("Please fill all required fields")
+            
             with col2:
                 if 'selected_reg' in locals() and selected_reg:
                     student_data = students_df[students_df['reg_no'] == selected_reg].iloc[0]
@@ -1905,8 +2178,10 @@ elif st.session_state.user_role == "teacher":
                     st.info(f"**Name:** {student_data['name']}")
                     st.info(f"**Class:** {student_data['class']}")
                     st.info(f"**Email:** {student_data['email']}")
+                    st.info(f"**Phone:** {student_data['phone']}")
                     st.info(f"**Total Points:** {student_data['total_points']}")
                     st.info(f"**Current Streak:** {student_data['current_streak']} days")
+                    
                     with st.expander("View Registered Subjects"):
                         subjects = get_student_subjects(student_data['student_id'])
                         if not subjects.empty:
@@ -1922,9 +2197,9 @@ elif st.session_state.user_role == "teacher":
         else:
             st.info("No students found.")
 
-    # View Submissions
+    # View Submissions with AI data
     elif page == "📂 View Submissions":
-        st.header("📂 Student Submissions")
+        st.header("📂 Student Submissions with AI Analysis")
 
         submissions_df = get_all_submissions_for_teacher()
 
@@ -1953,6 +2228,18 @@ elif st.session_state.user_role == "teacher":
                         st.write(f"**Type:** {row['submission_type']}")
                     with col2:
                         st.write(f"**Date:** {row['date']}")
+                    
+                    # AI Analysis
+                    if row['ai_confidence'] > 0:
+                        st.markdown("---")
+                        st.write("**🤖 AI Analysis:**")
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("AI Confidence", f"{row['ai_confidence']*100:.0f}%")
+                        with col2:
+                            st.metric("Originality", f"{(1-row['plagiarism_score'])*100:.0f}%")
+                        if row['ai_feedback']:
+                            st.info(f"📝 **AI Feedback:**\n{row['ai_feedback']}")
 
                     if row['file_path'] and os.path.exists(row['file_path']):
                         st.markdown("---")
@@ -1975,6 +2262,54 @@ elif st.session_state.user_role == "teacher":
         else:
             st.info("No submissions found.")
 
+    # AI Reference Answers Management
+    elif page == "🤖 AI Reference Answers":
+        st.header("🤖 AI Reference Answers Management")
+        st.info("Add reference answers to help the AI validate student submissions more accurately.")
+        
+        tab1, tab2 = st.tabs(["➕ Add Reference Answer", "📋 View Reference Answers"])
+        
+        with tab1:
+            with st.form("add_reference_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    subject = st.text_input("Subject*", placeholder="e.g., Database Management")
+                    topic = st.text_input("Topic*", placeholder="e.g., SQL Basics")
+                with col2:
+                    st.info("This reference answer will be used by AI to compare student submissions.")
+                
+                answer_text = st.text_area("Reference Answer*", height=200, 
+                    placeholder="Enter a comprehensive reference answer that demonstrates good quality...")
+                
+                if st.form_submit_button("Add Reference Answer"):
+                    if subject and topic and answer_text:
+                        if add_reference_answer(subject, topic, answer_text, teacher_id):
+                            st.success("✅ Reference answer added successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to add reference answer.")
+                    else:
+                        st.error("Please fill all required fields (*)")
+        
+        with tab2:
+            conn = get_db_connection()
+            try:
+                df = pd.read_sql_query('''
+                    SELECT answer_id, subject, topic, answer_text, created_at
+                    FROM reference_answers ORDER BY subject, topic
+                ''', conn)
+                if not df.empty:
+                    for _, row in df.iterrows():
+                        with st.expander(f"📚 {row['subject']} - {row['topic']}"):
+                            st.write(f"**Answer:** {row['answer_text']}")
+                            st.write(f"*Added: {row['created_at']}*")
+                else:
+                    st.info("No reference answers added yet.")
+            except:
+                st.info("No reference answers found.")
+            finally:
+                conn.close()
+
     # Class Analytics
     elif page == "📊 Class Analytics":
         st.header("Class Analytics")
@@ -1990,6 +2325,24 @@ elif st.session_state.user_role == "teacher":
         if not class_performance.empty:
             st.subheader("📈 Class Performance")
             st.dataframe(class_performance, use_container_width=True)
+
+        # AI Performance Analytics
+        st.subheader("🤖 AI Performance Metrics")
+        ai_metrics = pd.read_sql_query('''
+            SELECT 
+                AVG(ai_confidence) as avg_confidence,
+                AVG(plagiarism_score) as avg_plagiarism,
+                COUNT(*) as total_ai_graded
+            FROM submissions WHERE ai_confidence > 0
+        ''', conn)
+        if not ai_metrics.empty and ai_metrics['total_ai_graded'][0] > 0:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Avg AI Confidence", f"{ai_metrics['avg_confidence'][0]*100:.0f}%")
+            with col2:
+                st.metric("Avg Originality", f"{(1-ai_metrics['avg_plagiarism'][0])*100:.0f}%")
+            with col3:
+                st.metric("AI-Graded Submissions", ai_metrics['total_ai_graded'][0])
 
         st.subheader("📚 Subject-wise Student Distribution")
         subject_stats = pd.read_sql_query('''
@@ -2066,6 +2419,8 @@ elif st.session_state.user_role == "teacher":
                 stats_data["Value"].append(pd.read_sql_query("SELECT COUNT(*) FROM activities", conn).iloc[0,0] or 0)
                 stats_data["Metric"].append("Total Points Awarded")
                 stats_data["Value"].append(pd.read_sql_query("SELECT SUM(total_points) FROM students", conn).iloc[0,0] or 0)
+                stats_data["Metric"].append("AI-Graded Submissions")
+                stats_data["Value"].append(pd.read_sql_query("SELECT COUNT(*) FROM submissions WHERE ai_confidence > 0", conn).iloc[0,0] or 0)
             except:
                 pass
             finally:
@@ -2076,24 +2431,24 @@ elif st.session_state.user_role == "teacher":
             st.info("📌 Data is automatically cleaned - only last 6 months of submissions and activities are kept.")
         with tab2:
             st.subheader("System Settings")
-            st.success("✅ Auto-grading is enabled")
+            st.success("✅ Auto-grading with AI is enabled")
             st.write("**Current Points System:**")
-            st.write("- Daily Homework: 5 points")
-            st.write("- Seminar: 10 points")
-            st.write("- Project: 15 points")
-            st.write("- Extra Activity: 25 points")
-            st.write("- Weekly Assignment: 15 points")
-            st.write("- Monthly Assignment: 30 points")
-            st.write("- Research Paper: 25 points")
-            st.write("- Lab Report: 8 points")
+            st.write("- Daily Homework: 5 points (AI-adjusted)")
+            st.write("- Seminar: 10 points (AI-adjusted)")
+            st.write("- Project: 15 points (AI-adjusted)")
+            st.write("- Extra Activity: 25 points (AI-adjusted)")
+            st.write("- Weekly Assignment: 15 points (AI-adjusted)")
+            st.write("- Monthly Assignment: 30 points (AI-adjusted)")
+            st.write("- Research Paper: 25 points (AI-adjusted)")
+            st.write("- Lab Report: 8 points (AI-adjusted)")
 
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; padding: 15px 0; margin-top: 20px; border-top: 1px solid #ddd;'>
-    <p style='margin: 5px 0; font-weight: bold;'>Continuous Student Evaluation & Monitoring System v3.2</p>
+    <p style='margin: 5px 0; font-weight: bold;'>Continuous Student Evaluation & Monitoring System v4.0</p>
     <p style='margin: 3px 0;'>Design and Maintained by: S P Sajjan, Assistant Professor, GFGCW, Jamkhandi</p>
     <p style='margin: 3px 0;'>📧 Contact: sajjanvsl@gmail.com | 📞 Help Desk: 9008802403</p>
-    <p style='margin: 5px 0;'>✅ Auto-grading enabled | 📚 Dynamic Subjects & Classes | 🔐 Forgot Password | 📂 File Upload/Download/View</p>
+    <p style='margin: 5px 0;'>✅ AI-Powered Validation | 📚 Faculty Edit | 🔐 Forgot Password | 📂 File Upload/Download/View</p>
     <p style='margin: 3px 0; color: #666; font-size: 0.9em;'>📅 Data retention: 6 months (automatic cleanup)</p>
 </div>
 """, unsafe_allow_html=True)
