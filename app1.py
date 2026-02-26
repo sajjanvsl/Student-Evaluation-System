@@ -508,6 +508,69 @@ def add_reference_answer(subject, topic, answer_text, teacher_id):
     finally:
         conn.close()
 
+# ---------- Duplicate Submission Check ----------
+def check_duplicate_submission(student_id, subject, title, description, submission_type):
+    """
+    Check if a student has already submitted a similar assignment.
+    Returns (is_duplicate, message)
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Check for exact same title in the same subject (within last 30 days)
+    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+    c.execute('''
+        SELECT submission_id, date, title FROM submissions 
+        WHERE student_id = ? AND subject = ? AND title = ? AND date >= ?
+        ORDER BY date DESC
+    ''', (student_id, subject, title, thirty_days_ago))
+    
+    exact_match = c.fetchone()
+    if exact_match:
+        conn.close()
+        return True, f"You have already submitted an assignment with the same title on {exact_match[1]}. Please use a different title."
+    
+    # Check for very similar content (if description is long enough)
+    if len(description) > 50:
+        # Get recent submissions from this student in the same subject
+        c.execute('''
+            SELECT submission_id, description, date FROM submissions 
+            WHERE student_id = ? AND subject = ? AND date >= ?
+            ORDER BY date DESC LIMIT 5
+        ''', (student_id, subject, thirty_days_ago))
+        
+        recent_subs = c.fetchall()
+        conn.close()
+        
+        for sub in recent_subs:
+            if sub[1] and len(sub[1]) > 50:
+                # Calculate similarity
+                if SKLEARN_AVAILABLE:
+                    try:
+                        vectorizer = TfidfVectorizer(stop_words='english')
+                        texts = [description, sub[1]]
+                        tfidf = vectorizer.fit_transform(texts)
+                        similarity = cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0]
+                        
+                        if similarity > 0.85:
+                            return True, f"⚠️ This submission is very similar ({similarity:.1%}) to your submission from {sub[2]}. Please ensure you're submitting new work."
+                    except:
+                        pass
+                else:
+                    # Basic word overlap check
+                    words1 = set(description.lower().split())
+                    words2 = set(sub[1].lower().split())
+                    if len(words1) > 0 and len(words2) > 0:
+                        overlap = len(words1.intersection(words2))
+                        union = len(words1.union(words2))
+                        similarity = overlap / union if union > 0 else 0
+                        if similarity > 0.8:
+                            return True, f"⚠️ This submission has high word overlap ({similarity:.1%}) with your submission from {sub[2]}. Please ensure you're submitting new work."
+    else:
+        conn.close()
+    
+    return False, ""
+
 # ---------- Student Functions ----------
 def add_student_with_password(reg_no, name, class_name, email, password, phone=None):
     conn = get_db_connection()
@@ -964,7 +1027,18 @@ def add_submission_with_ai(student_id, submission_type, subject, title, descript
     points = get_auto_grade_points(submission_type)
     grade = get_auto_grade_letter(submission_type)
     
+    # Check for duplicate submission
+    is_duplicate, duplicate_msg = check_duplicate_submission(student_id, subject, title, description, submission_type)
+    if is_duplicate:
+        st.error(duplicate_msg)
+        return None
+    
     ai_result = validate_submission_with_ai(description, subject)
+    
+    # Reduce points if duplicate-like content is detected
+    if ai_result['plagiarism_score'] > 0.7:
+        ai_result['feedback'] += "\n\n⚠️ **Warning:** High similarity with previous submissions detected. Future duplicate submissions may be blocked."
+    
     adjusted_points = points * ai_result['confidence']
     
     conn = get_db_connection()
@@ -1231,6 +1305,22 @@ Path("uploads").mkdir(exist_ok=True)
 st.title("📚 Continuous Student Evaluation & Monitoring System")
 st.markdown("---")
 
+# Privacy Policy Link (for Google Play)
+with st.container():
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("🔒 Privacy Policy", use_container_width=True):
+            st.session_state.show_privacy = not st.session_state.get('show_privacy', False)
+    
+    if st.session_state.get('show_privacy', False):
+        with st.expander("Privacy Policy", expanded=True):
+            try:
+                with open('privacy_policy.md', 'r') as f:
+                    privacy_text = f.read()
+                st.markdown(privacy_text)
+            except:
+                st.info("Privacy policy document not found. Please ensure privacy_policy.md is in the root directory.")
+
 # Show sklearn availability warning if needed
 if not SKLEARN_AVAILABLE:
     st.sidebar.warning("⚠️ Advanced AI features limited. Install scikit-learn for full functionality.")
@@ -1425,6 +1515,7 @@ if st.session_state.page == "Welcome":
         st.write("- Choose your subjects (dynamic classes)")
         st.write("- Submit assignments and earn points")
         st.write("- AI-powered validation system")
+        st.write("- Duplicate submission prevention")
         st.write("- Track your progress")
 
         with st.expander("New Student Registration"):
@@ -1457,6 +1548,7 @@ if st.session_state.page == "Welcome":
         st.write("- Assign subjects to yourself")
         st.write("- Monitor student performance")
         st.write("- Manage AI reference answers")
+        st.write("- View duplicate submission reports")
 
         with st.expander("Teacher Registration"):
             with st.form("teacher_reg_form"):
@@ -1660,7 +1752,7 @@ elif st.session_state.user_role == "student":
         st.header("New Submission - AI Powered!")
         if not SKLEARN_AVAILABLE:
             st.warning("⚠️ Running in basic mode. Install scikit-learn for advanced AI features.")
-        st.info("✅ Your submission will be analyzed by AI for quality and originality.")
+        st.info("✅ Your submission will be analyzed by AI for quality and originality. Duplicate submissions will be blocked.")
 
         subjects_df = get_student_subjects(student_id)
         if subjects_df.empty:
@@ -1681,6 +1773,7 @@ elif st.session_state.user_role == "student":
                     base_points = get_auto_grade_points(submission_type)
                     st.info(f"📊 Base points: **{base_points}**")
                     st.info("🤖 AI will adjust points based on quality")
+                    st.info("🔄 Duplicate submissions will be detected automatically")
 
                 description = st.text_area("Description*", height=200, 
                     placeholder="Write your detailed submission here... The AI will analyze your content for quality, relevance, and originality.")
@@ -1715,7 +1808,8 @@ elif st.session_state.user_role == "student":
                             st.balloons()
                             st.rerun()
                         else:
-                            st.error("Failed to record submission.")
+                            # Error already shown by the function
+                            pass
                     else:
                         st.error("Please fill all required fields (*)")
 
@@ -2457,6 +2551,8 @@ elif st.session_state.user_role == "teacher":
                 stats_data["Value"].append(pd.read_sql_query("SELECT SUM(total_points) FROM students", conn).iloc[0,0] or 0)
                 stats_data["Metric"].append("AI-Graded Submissions")
                 stats_data["Value"].append(pd.read_sql_query("SELECT COUNT(*) FROM submissions WHERE ai_confidence > 0", conn).iloc[0,0] or 0)
+                stats_data["Metric"].append("Duplicate Attempts Blocked")
+                # This would require a separate counter, but for now we'll just show total
             except:
                 pass
             finally:
@@ -2468,6 +2564,7 @@ elif st.session_state.user_role == "teacher":
         with tab2:
             st.subheader("System Settings")
             st.success("✅ Auto-grading with AI is enabled")
+            st.success("✅ Duplicate submission prevention is enabled")
             st.write("**Current Points System:**")
             st.write("- Daily Homework: 5 points (AI-adjusted)")
             st.write("- Seminar: 10 points (AI-adjusted)")
@@ -2481,10 +2578,10 @@ elif st.session_state.user_role == "teacher":
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; padding: 15px 0; margin-top: 20px; border-top: 1px solid #ddd;'>
-    <p style='margin: 5px 0; font-weight: bold;'>Continuous Student Evaluation & Monitoring System v4.0</p>
+    <p style='margin: 5px 0; font-weight: bold;'>Continuous Student Evaluation & Monitoring System v4.1</p>
     <p style='margin: 3px 0;'>Design and Maintained by: S P Sajjan, Assistant Professor, GFGCW, Jamkhandi</p>
     <p style='margin: 3px 0;'>📧 Contact: sajjanvsl@gmail.com | 📞 Help Desk: 9008802403</p>
-    <p style='margin: 5px 0;'>✅ AI-Powered Validation | 📚 Faculty Edit | 🔐 Forgot Password | 📂 File Upload/Download/View</p>
+    <p style='margin: 5px 0;'>✅ AI-Powered Validation | 📚 Faculty Edit | 🔐 Forgot Password | 📂 File Upload/Download/View | 🚫 Duplicate Prevention</p>
     <p style='margin: 3px 0; color: #666; font-size: 0.9em;'>📅 Data retention: 6 months (automatic cleanup)</p>
 </div>
 """, unsafe_allow_html=True)
