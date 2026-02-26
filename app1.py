@@ -45,6 +45,14 @@ if 'submission_review' not in st.session_state:
     st.session_state.submission_review = None
 if 'page' not in st.session_state:
     st.session_state.page = "Welcome"
+if 'show_privacy' not in st.session_state:
+    st.session_state.show_privacy = False
+if 'show_terms' not in st.session_state:
+    st.session_state.show_terms = False
+if 'show_contact' not in st.session_state:
+    st.session_state.show_contact = False
+if 'show_deletion' not in st.session_state:
+    st.session_state.show_deletion = False
 
 # ---------- Database Helper (prevents locks) ----------
 def get_db_connection():
@@ -365,6 +373,68 @@ def cleanup_old_data():
         print(f"Cleanup error: {e}")
     finally:
         conn.close()
+
+# ---------- Data Deletion Functions ----------
+def request_data_deletion(email, user_type, reason):
+    """Submit a data deletion request."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Create deletion requests table if not exists
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS deletion_requests (
+            request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            user_type TEXT NOT NULL,
+            reason TEXT,
+            status TEXT DEFAULT 'Pending',
+            requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            processed_at TIMESTAMP
+        )
+    ''')
+    
+    c.execute('''
+        INSERT INTO deletion_requests (email, user_type, reason, status)
+        VALUES (?, ?, ?, 'Pending')
+    ''', (email, user_type, reason))
+    
+    conn.commit()
+    conn.close()
+    return True
+
+def process_data_deletion(email, user_type):
+    """Permanently delete user data (admin function)."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    if user_type == "student":
+        # Get student_id
+        c.execute("SELECT student_id FROM students WHERE email = ?", (email,))
+        student = c.fetchone()
+        if student:
+            student_id = student[0]
+            # Delete all related data
+            c.execute('DELETE FROM submissions WHERE student_id = ?', (student_id,))
+            c.execute('DELETE FROM activities WHERE student_id = ?', (student_id,))
+            c.execute('DELETE FROM daily_activity WHERE student_id = ?', (student_id,))
+            c.execute('DELETE FROM rewards WHERE student_id = ?', (student_id,))
+            c.execute('DELETE FROM point_transactions WHERE student_id = ?', (student_id,))
+            c.execute('DELETE FROM student_subjects WHERE student_id = ?', (student_id,))
+            c.execute('DELETE FROM students WHERE student_id = ?', (student_id,))
+    else:
+        # Delete teacher
+        c.execute('DELETE FROM teachers WHERE email = ?', (email,))
+    
+    # Update deletion request status
+    c.execute('''
+        UPDATE deletion_requests 
+        SET status = 'Processed', processed_at = CURRENT_TIMESTAMP
+        WHERE email = ? AND status = 'Pending'
+    ''', (email,))
+    
+    conn.commit()
+    conn.close()
+    return True
 
 # ---------- AI Validation Functions ----------
 def validate_submission_with_ai(submission_text, subject, topic=None):
@@ -1305,22 +1375,6 @@ Path("uploads").mkdir(exist_ok=True)
 st.title("📚 Continuous Student Evaluation & Monitoring System")
 st.markdown("---")
 
-# Privacy Policy Link (for Google Play)
-with st.container():
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if st.button("🔒 Privacy Policy", use_container_width=True):
-            st.session_state.show_privacy = not st.session_state.get('show_privacy', False)
-    
-    if st.session_state.get('show_privacy', False):
-        with st.expander("Privacy Policy", expanded=True):
-            try:
-                with open('privacy_policy.md', 'r') as f:
-                    privacy_text = f.read()
-                st.markdown(privacy_text)
-            except:
-                st.info("Privacy policy document not found. Please ensure privacy_policy.md is in the root directory.")
-
 # Show sklearn availability warning if needed
 if not SKLEARN_AVAILABLE:
     st.sidebar.warning("⚠️ Advanced AI features limited. Install scikit-learn for full functionality.")
@@ -1352,6 +1406,11 @@ with st.sidebar:
                 st.session_state.current_student = None
                 st.session_state.user_role = None
                 st.session_state.page = "Welcome"
+                # Reset footer tabs
+                st.session_state.show_privacy = False
+                st.session_state.show_terms = False
+                st.session_state.show_contact = False
+                st.session_state.show_deletion = False
                 st.rerun()
         elif st.session_state.user_role == "teacher":
             teacher = st.session_state.current_teacher
@@ -1370,6 +1429,11 @@ with st.sidebar:
                 st.session_state.current_teacher = None
                 st.session_state.user_role = None
                 st.session_state.page = "Welcome"
+                # Reset footer tabs
+                st.session_state.show_privacy = False
+                st.session_state.show_terms = False
+                st.session_state.show_contact = False
+                st.session_state.show_deletion = False
                 st.rerun()
     else:
         st.header("🔐 Login")
@@ -1390,6 +1454,11 @@ with st.sidebar:
                             st.session_state.current_student = student
                             st.session_state.user_role = "student"
                             st.session_state.page = "🏠 Dashboard"
+                            # Reset footer tabs
+                            st.session_state.show_privacy = False
+                            st.session_state.show_terms = False
+                            st.session_state.show_contact = False
+                            st.session_state.show_deletion = False
                             st.rerun()
                         else:
                             st.error("Invalid email or password!")
@@ -1403,6 +1472,11 @@ with st.sidebar:
                             st.session_state.current_student = student
                             st.session_state.user_role = "student"
                             st.session_state.page = "🏠 Dashboard"
+                            # Reset footer tabs
+                            st.session_state.show_privacy = False
+                            st.session_state.show_terms = False
+                            st.session_state.show_contact = False
+                            st.session_state.show_deletion = False
                             st.rerun()
                         else:
                             st.error("Invalid registration number or password!")
@@ -1419,6 +1493,11 @@ with st.sidebar:
                         st.session_state.current_teacher = teacher
                         st.session_state.user_role = "teacher"
                         st.session_state.page = "🏠 Teacher Dashboard"
+                        # Reset footer tabs
+                        st.session_state.show_privacy = False
+                        st.session_state.show_terms = False
+                        st.session_state.show_contact = False
+                        st.session_state.show_deletion = False
                         st.rerun()
                     else:
                         st.error("Invalid email or password!")
@@ -1481,6 +1560,11 @@ with st.sidebar:
                 ])
                 if selected != st.session_state.page:
                     st.session_state.page = selected
+                    # Reset footer tabs when navigating
+                    st.session_state.show_privacy = False
+                    st.session_state.show_terms = False
+                    st.session_state.show_contact = False
+                    st.session_state.show_deletion = False
                     st.rerun()
             else:
                 st.radio("Go to:", [
@@ -1499,6 +1583,11 @@ with st.sidebar:
             ])
             if selected != st.session_state.page:
                 st.session_state.page = selected
+                # Reset footer tabs when navigating
+                st.session_state.show_privacy = False
+                st.session_state.show_terms = False
+                st.session_state.show_contact = False
+                st.session_state.show_deletion = False
                 st.rerun()
     else:
         if st.session_state.page != "Welcome":
@@ -2551,8 +2640,8 @@ elif st.session_state.user_role == "teacher":
                 stats_data["Value"].append(pd.read_sql_query("SELECT SUM(total_points) FROM students", conn).iloc[0,0] or 0)
                 stats_data["Metric"].append("AI-Graded Submissions")
                 stats_data["Value"].append(pd.read_sql_query("SELECT COUNT(*) FROM submissions WHERE ai_confidence > 0", conn).iloc[0,0] or 0)
-                stats_data["Metric"].append("Duplicate Attempts Blocked")
-                # This would require a separate counter, but for now we'll just show total
+                stats_data["Metric"].append("Pending Deletion Requests")
+                stats_data["Value"].append(pd.read_sql_query("SELECT COUNT(*) FROM deletion_requests WHERE status='Pending'", conn).iloc[0,0] or 0)
             except:
                 pass
             finally:
@@ -2575,7 +2664,321 @@ elif st.session_state.user_role == "teacher":
             st.write("- Research Paper: 25 points (AI-adjusted)")
             st.write("- Lab Report: 8 points (AI-adjusted)")
 
+# ========== FOOTER WITH FOUR TABS ==========
 st.markdown("---")
+
+# Footer tabs
+footer_col1, footer_col2, footer_col3, footer_col4 = st.columns(4)
+
+with footer_col1:
+    if st.button("🔒 Privacy Policy", use_container_width=True):
+        st.session_state.show_privacy = not st.session_state.get('show_privacy', False)
+        # Close other tabs
+        st.session_state.show_terms = False
+        st.session_state.show_contact = False
+        st.session_state.show_deletion = False
+
+with footer_col2:
+    if st.button("📜 Terms & Disclaimer", use_container_width=True):
+        st.session_state.show_terms = not st.session_state.get('show_terms', False)
+        # Close other tabs
+        st.session_state.show_privacy = False
+        st.session_state.show_contact = False
+        st.session_state.show_deletion = False
+
+with footer_col3:
+    if st.button("📩 Contact / About", use_container_width=True):
+        st.session_state.show_contact = not st.session_state.get('show_contact', False)
+        # Close other tabs
+        st.session_state.show_privacy = False
+        st.session_state.show_terms = False
+        st.session_state.show_deletion = False
+
+with footer_col4:
+    if st.button("🗑️ Data Deletion", use_container_width=True):
+        st.session_state.show_deletion = not st.session_state.get('show_deletion', False)
+        # Close other tabs
+        st.session_state.show_privacy = False
+        st.session_state.show_terms = False
+        st.session_state.show_contact = False
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# Privacy Policy Tab
+if st.session_state.get('show_privacy', False):
+    with st.container():
+        st.markdown("""
+        <div style='background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px;'>
+            <h3 style='color: #1f77b4;'>🔒 Privacy Policy</h3>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        try:
+            with open('privacy_policy.md', 'r') as f:
+                privacy_text = f.read()
+            st.markdown(privacy_text)
+        except FileNotFoundError:
+            st.info("📄 Privacy policy document will be available soon. Please check back later.")
+            with st.expander("View Sample Privacy Policy"):
+                st.markdown("""
+                # Privacy Policy for Student Evaluation System
+                
+                **Last Updated: February 2026**
+                
+                ## 1. Introduction
+                Welcome to the Student Evaluation System. This Privacy Policy explains how we collect, use, and protect your information.
+                
+                ## 2. Information We Collect
+                - Name and registration number
+                - Email address and phone number
+                - Academic class and subject information
+                - Assignment submissions and grades
+                
+                ## 3. How We Use Your Information
+                - To provide educational services
+                - To grade assignments and track progress
+                - To generate leaderboards and reward points
+                
+                ## 4. Data Storage
+                - All data is stored securely
+                - Passwords are hashed and encrypted
+                - Data retention: 6 months for submissions
+                
+                ## 5. Contact Us
+                Email: sajjanvsl@gmail.com
+                Phone: 9008802403
+                """)
+
+# Terms & Disclaimer Tab
+if st.session_state.get('show_terms', False):
+    with st.container():
+        st.markdown("""
+        <div style='background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px;'>
+            <h3 style='color: #ff6b4a;'>📜 Terms & Disclaimer</h3>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("""
+        ### Terms of Use
+        
+        By using this Student Evaluation System, you agree to the following terms:
+        
+        1. **Acceptance of Terms**
+           - By accessing or using this system, you agree to be bound by these terms.
+           - If you do not agree, please do not use the system.
+        
+        2. **User Accounts**
+           - You are responsible for maintaining the confidentiality of your account.
+           - You are responsible for all activities under your account.
+           - Notify us immediately of any unauthorized use.
+        
+        3. **Acceptable Use**
+           - You agree to use the system only for lawful purposes.
+           - You will not submit false or misleading information.
+           - You will not attempt to bypass security measures.
+           - You will not submit plagiarized content.
+        
+        4. **Academic Integrity**
+           - All submissions must be your own original work.
+           - The system uses AI to detect potential plagiarism.
+           - Repeated violations may result in account suspension.
+        
+        5. **Intellectual Property**
+           - The system and its content are protected by copyright.
+           - You retain ownership of your submitted content.
+           - You grant us license to use submissions for educational purposes.
+        
+        ### Disclaimer
+        
+        **Limitation of Liability**
+        
+        The Student Evaluation System is provided "as is" without warranties of any kind. We do not guarantee that:
+        
+        - The system will be error-free or uninterrupted
+        - Results from AI grading will be perfect
+        - Data loss will not occur
+        
+        We are not liable for any damages arising from:
+        - Use or inability to use the system
+        - Loss of data or profits
+        - Academic decisions based on system output
+        
+        **Educational Use Only**
+        
+        This system is designed as an educational tool to assist in the evaluation process. Final academic decisions should be made by qualified educators considering multiple factors.
+        
+        **Changes to Terms**
+        
+        We reserve the right to modify these terms at any time. Continued use of the system constitutes acceptance of updated terms.
+        
+        *Last updated: February 2026*
+        """)
+
+# Contact / About Tab
+if st.session_state.get('show_contact', False):
+    with st.container():
+        st.markdown("""
+        <div style='background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px;'>
+            <h3 style='color: #2ecc71;'>📩 Contact & About Developer</h3>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            ### 👨‍🏫 About the Developer
+            
+            **S P Sajjan**
+            *Assistant Professor*
+            *GFGCW, Jamkhandi*
+            
+            ### 🎓 Qualifications
+            - M.Sc., M.Phil., (Ph.D.)
+            - 15+ years of teaching experience
+            - Specialization in Computer Science
+            
+            ### 🏆 Achievements
+            - Developed innovative educational tools
+            - Published research in AI in Education
+            - Recognized for contribution to digital learning
+            
+            ### 💼 Professional Memberships
+            - Indian Society for Technical Education (ISTE)
+            - Computer Society of India (CSI)
+            - International Association of Engineers (IAENG)
+            """)
+        
+        with col2:
+            st.markdown("""
+            ### 📞 Contact Information
+            
+            **Email:** sajjanvsl@gmail.com  
+            **Phone:** +91 9008802403  
+            **WhatsApp:** +91 9008802403  
+            
+            **Office Address:**  
+            Department of Computer Science  
+            GFGCW, Jamkhandi  
+            Karnataka, India - 587301
+            
+            ### 🌐 Online Presence
+            - [LinkedIn](https://linkedin.com/in/spsajjan)
+            - [ResearchGate](https://researchgate.net/profile/S-P-Sajjan)
+            - [Google Scholar](https://scholar.google.com)
+            
+            ### 🤝 Support
+            For technical support, bug reports, or feature requests:
+            - Email: support@edueval.com
+            - Response time: Within 24 hours
+            - Available: Monday to Friday, 9 AM - 5 PM IST
+            """)
+        
+        st.markdown("---")
+        st.markdown("""
+        ### 💡 About This Project
+        
+        **Continuous Student Evaluation & Monitoring System v4.1**
+        
+        This system is designed to modernize student evaluation through:
+        
+        - 🤖 AI-Powered Validation of assignments
+        - 📊 Real-time progress tracking
+        - 🎯 Gamification through reward points
+        - 📚 Dynamic subject management
+        - 🔒 Secure authentication and data protection
+        
+        **Technology Stack:**
+        - Frontend: Streamlit
+        - Backend: Python, SQLite
+        - AI: scikit-learn, TF-IDF, Cosine Similarity
+        - Deployment: Streamlit Cloud
+        
+        **Version History:**
+        - v4.1 (Current): Added privacy tabs, duplicate prevention
+        - v4.0: AI validation, faculty edit features
+        - v3.2: File upload, forgot password
+        - v3.0: Subject-wise registration
+        """)
+
+# Data Deletion Tab
+if st.session_state.get('show_deletion', False):
+    with st.container():
+        st.markdown("""
+        <div style='background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px;'>
+            <h3 style='color: #e74c3c;'>🗑️ Data Deletion Request</h3>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.warning("⚠️ This action is irreversible. All your data will be permanently deleted.")
+        
+        if st.session_state.user_role:
+            # Logged in user can request deletion
+            user_email = ""
+            user_type = st.session_state.user_role
+            
+            if user_type == "student":
+                student = st.session_state.current_student
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("PRAGMA table_info(students)")
+                columns = [col[1] for col in c.fetchall()]
+                conn.close()
+                student_dict = dict(zip(columns, student))
+                user_email = student_dict.get('email', '')
+            else:
+                teacher = st.session_state.current_teacher
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("PRAGMA table_info(teachers)")
+                columns = [col[1] for col in c.fetchall()]
+                conn.close()
+                teacher_dict = dict(zip(columns, teacher))
+                user_email = teacher_dict.get('email', '')
+            
+            st.info(f"**Your email:** {user_email}")
+            
+            with st.form("deletion_request_form"):
+                st.markdown("### Please confirm data deletion")
+                
+                reason = st.text_area("Reason for deletion (optional)", 
+                                      placeholder="Help us improve by sharing your reason...")
+                
+                confirm_text = st.text_input("Type 'DELETE' to confirm", type="password")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.form_submit_button("✅ Request Deletion"):
+                        if confirm_text == "DELETE":
+                            if request_data_deletion(user_email, user_type, reason):
+                                st.success("✅ Your deletion request has been submitted. An administrator will process it within 7 days.")
+                                st.info("📧 You will receive a confirmation email once your data is deleted.")
+                        else:
+                            st.error("Please type 'DELETE' to confirm")
+                with col2:
+                    if st.form_submit_button("↩️ Cancel"):
+                        st.session_state.show_deletion = False
+                        st.rerun()
+        else:
+            # Not logged in - provide email form
+            st.info("Please provide your email address to request data deletion.")
+            
+            with st.form("deletion_request_public_form"):
+                email = st.text_input("Email address*")
+                user_type = st.selectbox("I am a*", ["Student", "Teacher"])
+                reason = st.text_area("Reason for deletion (optional)")
+                
+                confirm_text = st.text_input("Type 'DELETE' to confirm*", type="password")
+                
+                if st.form_submit_button("Submit Deletion Request"):
+                    if email and confirm_text == "DELETE":
+                        if request_data_deletion(email.strip().lower(), user_type.lower(), reason):
+                            st.success("✅ Your deletion request has been submitted. An administrator will process it within 7 days.")
+                            st.info("📧 You will receive a confirmation email once your data is deleted.")
+                    else:
+                        st.error("Please provide email and type 'DELETE' to confirm")
+
+# Main footer with credits
 st.markdown("""
 <div style='text-align: center; padding: 15px 0; margin-top: 20px; border-top: 1px solid #ddd;'>
     <p style='margin: 5px 0; font-weight: bold;'>Continuous Student Evaluation & Monitoring System v4.1</p>
