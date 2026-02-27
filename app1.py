@@ -57,13 +57,6 @@ if 'show_deletion' not in st.session_state:
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
-# Check if user is already logged in (for persistence)
-def check_session_persistence():
-    """Check if we have a valid session and restore it."""
-    # This is automatically handled by Streamlit's session state
-    # We just need to ensure we don't show login when already logged in
-    pass
-
 # ---------- Database Helper (prevents locks) ----------
 def get_db_connection():
     """Return a database connection with busy timeout and thread safety."""
@@ -75,41 +68,61 @@ def get_db_connection():
 def validate_class_name(class_name):
     """Validate and normalize class name to prevent inconsistent entries."""
     if not class_name or len(class_name.strip()) < 2:
-        return False, "Class name is too short"
+        return False, "❌ Class name is too short. Please use format like 'BCA VI', 'BA II', etc."
     
     # Remove extra spaces and normalize
     class_name = ' '.join(class_name.strip().split())
+    original_input = class_name
+    
+    # Convert to uppercase for pattern matching
+    class_upper = class_name.upper()
     
     # Common patterns for class names
     patterns = [
-        r'^[A-Za-z]{2,4}\s*(?:I{1,3}|IV|V|VI|VII|VIII|IX|X|1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th|\d+)$',
-        r'^[A-Za-z]{2,4}\s*(?:Semester|Sem)\s*(?:I{1,3}|IV|V|VI|\d+)$',
-        r'^(?:BA|BCom|BSc|BCA|MCA|MA|MCom|MSc)\s*(?:I{1,3}|IV|V|VI|VII|VIII|\d+)$'
+        # Pattern for "BCA VI", "BA II", "BCom I", "MCA III" etc.
+        r'^(BA|BCom|BSC|BCA|MCA|MA|MCom|MSC|BBA|MBA|B TECH|M TECH|DIPLOMA)\s*([IVXLCDM]+|\d+)$',
+        # Pattern for "Semester 1", "Sem 2", "Semester VI" etc.
+        r'^(SEMESTER|SEM)\s*([IVXLCDM]+|\d+)$',
+        # Pattern for "1st Year", "2nd Year", "3rd Year" etc.
+        r'^(\d+)(?:ST|ND|RD|TH)?\s*YEAR$',
+        # Pattern for "Class 10", "Class 12" etc.
+        r'^CLASS\s*(\d+)$'
     ]
     
     for pattern in patterns:
-        if re.match(pattern, class_name.upper(), re.IGNORECASE):
-            # Normalize to a standard format (e.g., "BCA VI" instead of "BCA 6th sem")
-            # Extract the main part and number
-            match = re.match(r'^([A-Za-z]{2,4})\s*(\w+)$', class_name.upper())
-            if match:
-                prefix, suffix = match.groups()
-                # Convert Roman numerals or numbers to standard
-                roman_map = {'I': 'I', 'II': 'II', 'III': 'III', 'IV': 'IV', 'V': 'V', 'VI': 'VI'}
+        match = re.match(pattern, class_upper)
+        if match:
+            # Extract the main part and number/suffix
+            parts = match.groups()
+            if len(parts) == 2:
+                prefix, suffix = parts
+                
+                # Convert Roman numerals to standard form
+                roman_map = {'I': 'I', 'II': 'II', 'III': 'III', 'IV': 'IV', 'V': 'V', 'VI': 'VI', 
+                            'VII': 'VII', 'VIII': 'VIII', 'IX': 'IX', 'X': 'X'}
+                
                 if suffix in roman_map:
-                    return True, f"{prefix} {roman_map[suffix]}"
+                    normalized = f"{prefix} {roman_map[suffix]}"
                 elif suffix.isdigit():
                     num = int(suffix)
                     if 1 <= num <= 10:
                         roman_numerals = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X']
-                        return True, f"{prefix} {roman_numerals[num-1]}"
-            return True, class_name.upper()
+                        normalized = f"{prefix} {roman_numerals[num-1]}"
+                    else:
+                        normalized = f"{prefix} {suffix}"
+                else:
+                    normalized = f"{prefix} {suffix}"
+                
+                # Clean up the prefix (remove extra spaces)
+                normalized = ' '.join(normalized.split())
+                return True, normalized
     
-    # If no pattern matches but it looks reasonable, accept it
-    if len(class_name) <= 20 and re.match(r'^[A-Za-z0-9\s\-]+$', class_name):
-        return True, class_name.upper()
+    # If no pattern matches but it looks like a reasonable class name
+    if len(class_name) <= 30 and re.match(r'^[A-Za-z0-9\s\-]+$', class_name):
+        # Still warn but accept it
+        return True, class_name.upper(), "⚠️ Non-standard format. Please use format like 'BCA VI' for consistency."
     
-    return False, "Invalid class name format. Please use format like 'BCA VI', 'BA II', 'BCom I', etc."
+    return False, "❌ Invalid class name format. Please use standard format like 'BCA VI', 'BA II', 'BCom I', 'Semester 1', etc."
 
 # ---------- Database Initialisation ----------
 def init_database():
@@ -226,6 +239,10 @@ def init_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+    else:
+        # Check if we need to add any columns
+        c.execute("PRAGMA table_info(subjects)")
+        columns = [col[1] for col in c.fetchall()]
 
     # Student subjects junction
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='student_subjects'")
@@ -947,11 +964,20 @@ def get_all_teachers():
     finally:
         conn.close()
 
-# ---------- Subject Functions ----------
+# ---------- Subject Functions (FIXED) ----------
 def add_subject(subject_code, subject_name, class_name, teacher_id=None):
+    """Add a new subject with duplicate prevention."""
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        subject_code = subject_code.strip().upper()
+        
+        # Check if subject code already exists
+        c.execute("SELECT subject_id FROM subjects WHERE subject_code = ? COLLATE NOCASE", (subject_code,))
+        if c.fetchone():
+            st.error(f"❌ Subject code '{subject_code}' already exists! Please use a different code.")
+            return False
+        
         # Validate class name
         is_valid, normalized_class = validate_class_name(class_name)
         if not is_valid:
@@ -961,17 +987,47 @@ def add_subject(subject_code, subject_name, class_name, teacher_id=None):
         c.execute('''
             INSERT INTO subjects (subject_code, subject_name, class, teacher_id)
             VALUES (?, ?, ?, ?)
-        ''', (subject_code.strip(), subject_name, normalized_class, teacher_id))
+        ''', (subject_code, subject_name, normalized_class, teacher_id))
         conn.commit()
-        st.success(f"Subject created for class: {normalized_class}")
+        st.success(f"✅ Subject '{subject_code}' created successfully for class: {normalized_class}")
         return True
-    except sqlite3.IntegrityError:
-        st.error("Subject code already exists!")
+    except sqlite3.IntegrityError as e:
+        st.error(f"❌ Subject code already exists!")
+        return False
+    finally:
+        conn.close()
+
+def delete_subject(subject_id):
+    """Delete a subject and all its registrations."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # First check if any students are registered for this subject
+        c.execute("SELECT COUNT(*) FROM student_subjects WHERE subject_id = ?", (subject_id,))
+        count = c.fetchone()[0]
+        
+        if count > 0:
+            # Ask for confirmation
+            if not st.session_state.get(f'confirm_delete_{subject_id}', False):
+                st.session_state[f'confirm_delete_{subject_id}'] = True
+                st.warning(f"⚠️ This subject has {count} student registrations. Delete anyway?")
+                return False
+        
+        # Delete student registrations first
+        c.execute("DELETE FROM student_subjects WHERE subject_id = ?", (subject_id,))
+        # Delete the subject
+        c.execute("DELETE FROM subjects WHERE subject_id = ?", (subject_id,))
+        conn.commit()
+        st.success("✅ Subject deleted successfully!")
+        return True
+    except Exception as e:
+        st.error(f"Error deleting subject: {str(e)}")
         return False
     finally:
         conn.close()
 
 def get_all_subjects(class_name=None):
+    """Get all subjects, optionally filtered by class."""
     conn = get_db_connection()
     try:
         if class_name:
@@ -997,24 +1053,28 @@ def get_all_subjects(class_name=None):
             '''
             df = pd.read_sql_query(query, conn)
         return df
-    except:
+    except Exception as e:
+        print(f"Error getting subjects: {e}")
         return pd.DataFrame()
     finally:
         conn.close()
 
 def assign_subject_to_teacher(subject_id, teacher_id):
+    """Assign a subject to a teacher."""
     conn = get_db_connection()
     c = conn.cursor()
     try:
         c.execute('UPDATE subjects SET teacher_id = ? WHERE subject_id = ?', (teacher_id, subject_id))
         conn.commit()
         return True
-    except:
+    except Exception as e:
+        print(f"Error assigning subject: {e}")
         return False
     finally:
         conn.close()
 
 def register_student_subjects(student_id, subject_ids):
+    """Register student for multiple subjects."""
     conn = get_db_connection()
     c = conn.cursor()
     try:
@@ -1032,6 +1092,7 @@ def register_student_subjects(student_id, subject_ids):
         conn.close()
 
 def get_student_subjects(student_id):
+    """Get all subjects a student is registered for."""
     conn = get_db_connection()
     try:
         query = '''
@@ -1045,12 +1106,12 @@ def get_student_subjects(student_id):
         '''
         df = pd.read_sql_query(query, conn, params=(student_id,))
         return df
-    except:
+    except Exception as e:
+        print(f"Error getting student subjects: {e}")
         return pd.DataFrame()
     finally:
         conn.close()
 
-# FIXED: Remove student subject function
 def remove_student_subject(student_id, subject_id):
     """Remove a subject from student's registration."""
     conn = get_db_connection()
@@ -2409,7 +2470,7 @@ elif st.session_state.user_role == "teacher":
         if not class_dist.empty:
             st.dataframe(class_dist, use_container_width=True)
 
-    # Subject Management
+    # Subject Management (FIXED VERSION)
     elif st.session_state.page == "📚 Subject Management":
         st.header("📚 Subject Management")
         st.info("Enter class names in standard format (e.g., BCA VI, BA II, BCom I)")
@@ -2419,16 +2480,19 @@ elif st.session_state.user_role == "teacher":
         with tab1:
             st.subheader("Create New Subject")
             with st.form("create_subject_form"):
-                subject_code = st.text_input("Subject Code*", placeholder="e.g., HIST101, MATH202")
-                subject_name = st.text_input("Subject Name*", placeholder="e.g., World History, Calculus")
-                class_name = st.text_input("Class*", placeholder="e.g., BCA VI, BA II, BCom I")
-                assign_to_self = st.checkbox("Assign this subject to me")
+                col1, col2 = st.columns(2)
+                with col1:
+                    subject_code = st.text_input("Subject Code*", placeholder="e.g., MATH101, CS202")
+                    subject_name = st.text_input("Subject Name*", placeholder="e.g., Calculus, Programming")
+                with col2:
+                    class_name = st.text_input("Class*", placeholder="e.g., BCA VI, BA II")
+                    assign_to_self = st.checkbox("Assign this subject to me")
+                
                 if st.form_submit_button("Create Subject"):
                     if subject_code and subject_name and class_name:
                         teacher_id_to_assign = teacher_id if assign_to_self else None
-                        if add_subject(subject_code, subject_name, class_name, teacher_id_to_assign):
-                            st.rerun()
-                        # Error message already shown in function
+                        add_subject(subject_code, subject_name, class_name, teacher_id_to_assign)
+                        # No rerun here - error/success message handled in function
                     else:
                         st.error("Please fill all required fields (*)")
 
@@ -2436,19 +2500,45 @@ elif st.session_state.user_role == "teacher":
             st.subheader("Subjects I Teach")
             subjects_df = get_all_subjects()
             my_subjects = subjects_df[subjects_df['teacher_id'] == teacher_id] if not subjects_df.empty else pd.DataFrame()
+            
             if not my_subjects.empty:
+                # Display subjects in a table
                 st.dataframe(my_subjects[['subject_code', 'subject_name', 'class', 'created_at']],
                            use_container_width=True)
-                with st.expander("Remove Subject from My List"):
-                    subject_to_remove = st.selectbox(
-                        "Select Subject to Remove",
-                        my_subjects['subject_name'].tolist()
-                    )
-                    if st.button("Remove from My Subjects"):
-                        subject_id = my_subjects[my_subjects['subject_name'] == subject_to_remove]['subject_id'].iloc[0]
-                        if assign_subject_to_teacher(subject_id, None):
-                            st.success(f"Removed {subject_to_remove} from your subjects!")
-                            st.rerun()
+                
+                # Subject removal section
+                st.markdown("---")
+                st.subheader("🗑️ Delete Subjects")
+                st.warning("⚠️ Deleting a subject will also remove all student registrations for that subject.")
+                
+                # Select subject to delete
+                subject_options = {}
+                for _, row in my_subjects.iterrows():
+                    subject_options[f"{row['subject_code']} - {row['subject_name']} ({row['class']})"] = row['subject_id']
+                
+                if subject_options:
+                    selected_subject = st.selectbox("Select subject to delete:", list(subject_options.keys()))
+                    
+                    if selected_subject:
+                        subject_id = subject_options[selected_subject]
+                        
+                        # Check if subject has students
+                        conn = get_db_connection()
+                        c = conn.cursor()
+                        c.execute("SELECT COUNT(*) FROM student_subjects WHERE subject_id = ?", (subject_id,))
+                        student_count = c.fetchone()[0]
+                        conn.close()
+                        
+                        if student_count > 0:
+                            st.warning(f"⚠️ This subject has {student_count} student(s) registered.")
+                        
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            if st.button("🗑️ Delete Subject", type="secondary"):
+                                if delete_subject(subject_id):
+                                    st.rerun()
+                        with col2:
+                            st.caption("This action cannot be undone.")
             else:
                 st.info("You haven't been assigned any subjects yet.")
 
@@ -2759,7 +2849,7 @@ elif st.session_state.user_role == "teacher":
                         st.session_state.current_teacher = tuple(teacher)
                         st.rerun()
 
-    # Manage System (FIXED STATS SECTION)
+    # Manage System
     elif st.session_state.page == "⚙️ Manage System":
         st.header("System Management")
         tab1, tab2 = st.tabs(["📊 System Stats", "⚙️ Settings"])
