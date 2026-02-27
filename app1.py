@@ -29,7 +29,6 @@ except ImportError:
 st.set_page_config(page_title="Student Evaluation System", page_icon="📚", layout="wide", initial_sidebar_state="expanded")
 
 # ---------- Session State for Persistence ----------
-# Initialize all session state variables
 if 'current_student' not in st.session_state:
     st.session_state.current_student = None
 if 'current_teacher' not in st.session_state:
@@ -1026,16 +1025,13 @@ def delete_subject(subject_id):
     finally:
         conn.close()
 
+# FIXED: Enhanced get_all_subjects with multiple matching strategies
 def get_all_subjects(class_name=None):
-    """Get all subjects, optionally filtered by class."""
+    """Get all subjects, optionally filtered by class with multiple matching strategies."""
     conn = get_db_connection()
     try:
         if class_name:
-            # Normalize the class name for lookup
-            is_valid, normalized_class = validate_class_name(class_name)
-            if not is_valid:
-                return pd.DataFrame()
-                
+            # First try exact match
             query = '''
                 SELECT s.*, t.name as teacher_name
                 FROM subjects s
@@ -1043,7 +1039,24 @@ def get_all_subjects(class_name=None):
                 WHERE s.class = ?
                 ORDER BY s.subject_name
             '''
-            df = pd.read_sql_query(query, conn, params=(normalized_class,))
+            df = pd.read_sql_query(query, conn, params=(class_name,))
+            
+            # If no results, try normalized version
+            if df.empty:
+                is_valid, normalized_class = validate_class_name(class_name)
+                if is_valid and normalized_class != class_name:
+                    df = pd.read_sql_query(query, conn, params=(normalized_class,))
+            
+            # If still empty, try case-insensitive match
+            if df.empty:
+                query_ci = '''
+                    SELECT s.*, t.name as teacher_name
+                    FROM subjects s
+                    LEFT JOIN teachers t ON s.teacher_id = t.teacher_id
+                    WHERE LOWER(s.class) = LOWER(?)
+                    ORDER BY s.subject_name
+                '''
+                df = pd.read_sql_query(query_ci, conn, params=(class_name,))
         else:
             query = '''
                 SELECT s.*, t.name as teacher_name
@@ -1054,7 +1067,7 @@ def get_all_subjects(class_name=None):
             df = pd.read_sql_query(query, conn)
         return df
     except Exception as e:
-        print(f"Error getting subjects: {e}")
+        print(f"Error in get_all_subjects: {e}")
         return pd.DataFrame()
     finally:
         conn.close()
